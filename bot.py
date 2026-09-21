@@ -368,6 +368,22 @@ class LicensePanelView(discord.ui.View):
 
 
 # ==========================================
+# WEB SERVER FOR RENDER FREE TIER
+# ==========================================
+async def start_web_server():
+    """Starts a lightweight HTTP server so Render Web Service (Free Tier) stays healthy."""
+    from aiohttp import web
+    app = web.Application()
+    app.router.add_get('/', lambda req: web.Response(text="Discord License Bot is Online 24/7!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"[*] HTTP health server started on port {port}")
+
+
+# ==========================================
 # BOT INITIALIZATION & EVENTS
 # ==========================================
 intents = discord.Intents.default()
@@ -379,6 +395,12 @@ async def on_ready():
     """Fired when the bot connects to Discord. Syncs slash commands instantly."""
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("--------------------------------------------------")
+
+    # Start HTTP server for Render free web service
+    try:
+        await start_web_server()
+    except Exception as we:
+        print(f"[!] Web server notice: {we}")
 
     # Register persistent button view
     bot.add_view(LicensePanelView())
