@@ -359,11 +359,16 @@ class DeleteKeyModal(discord.ui.Modal, title="Delete License Key"):
 
 
 # ==========================================
-# PRODUCT SELECTION DROPDOWN VIEW
+# DISCORD CONTROL PANEL VIEW WITH INTEGRATED DROPDOWN
 # ==========================================
-class ProductSelect(discord.ui.Select):
+class LicensePanelView(discord.ui.View):
     def __init__(self):
-        options = [
+        super().__init__(timeout=None)  # Persistent view across restarts
+
+    @discord.ui.select(
+        placeholder="Select Product Type to Generate Key...",
+        custom_id="select_product_type_panel",
+        options=[
             discord.SelectOption(
                 label="INTERNAL",
                 value="INTERNAL",
@@ -382,39 +387,27 @@ class ProductSelect(discord.ui.Select):
                 description="Format: ADAMCORP-AMKxxxx",
                 emoji="🎯"
             )
-        ]
-        super().__init__(
-            placeholder="Select a Product Type...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
+        ],
+        row=0
+    )
+    async def select_product_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+            await interaction.response.send_message(
+                f"❌ You need the **{REQUIRED_ROLE_NAME}** role to generate keys.",
+                ephemeral=True
+            )
+            return
 
-    async def callback(self, interaction: discord.Interaction):
-        product_type = self.values[0]
+        product_type = select.values[0]
         prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
         await interaction.response.send_modal(GenerateKeyModal(product_type, prefix))
-
-
-class ProductSelectView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=60)
-        self.add_item(ProductSelect())
-
-
-# ==========================================
-# DISCORD BUTTON PANEL VIEW
-# ==========================================
-class LicensePanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)  # Persistent view across restarts
 
     @discord.ui.button(
         label="Generate Key",
         style=discord.ButtonStyle.success,
         emoji="🔑",
         custom_id="btn_generate_key",
-        row=0
+        row=1
     )
     async def btn_generate_key(self, interaction: discord.Interaction, button: discord.ui.Button):
         if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
@@ -423,20 +416,15 @@ class LicensePanelView(discord.ui.View):
                 ephemeral=True
             )
             return
-
-        # Prompt user to select product type first
-        await interaction.response.send_message(
-            "Select the **Product Type** for the license key you wish to generate:",
-            view=ProductSelectView(),
-            ephemeral=True
-        )
+        prefix = PRODUCT_PREFIXES.get("INTERNAL", f"{BASE_PREFIX}-INT")
+        await interaction.response.send_modal(GenerateKeyModal("INTERNAL", prefix))
 
     @discord.ui.button(
         label="Key Info",
         style=discord.ButtonStyle.primary,
         emoji="🔍",
         custom_id="btn_key_info",
-        row=0
+        row=1
     )
     async def btn_key_info(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(KeyInfoModal())
@@ -446,7 +434,7 @@ class LicensePanelView(discord.ui.View):
         style=discord.ButtonStyle.danger,
         emoji="🗑️",
         custom_id="btn_delete_key",
-        row=1
+        row=2
     )
     async def btn_delete_key(self, interaction: discord.Interaction, button: discord.ui.Button):
         if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
