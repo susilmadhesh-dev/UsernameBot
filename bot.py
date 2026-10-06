@@ -1,8 +1,13 @@
 """
 Discord License Key Management Bot
 -----------------------------------
-A discord.py bot with an interactive button panel & pop-up modals for license key management.
-Matches exact design: Generate Key, Key Info, Delete Key, Reseller role enforcement.
+A discord.py bot with an interactive button panel, product selection dropdown,
+pop-up modals, SQLite database persistence, and DM key delivery.
+
+Supports 3 Product Types:
+- INTERNAL   (Prefix: ADAMCORP-INT)
+- SILENT AIM (Prefix: ADAMCORP-SIA)
+- AIMKILL    (Prefix: ADAMCORP-AMK)
 """
 
 import os
@@ -26,9 +31,16 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID", "").strip()
 
 # Key Generation Settings
-KEY_PREFIX = os.getenv("KEY_PREFIX", "ADAMCORP")
+BASE_PREFIX = os.getenv("KEY_PREFIX", "ADAMCORP")
 KEY_LENGTH = int(os.getenv("KEY_LENGTH", "5"))
-ALLOWED_CHARACTERS = string.ascii_uppercase + string.digits  # Uppercase A-Z and 0-9
+ALLOWED_CHARACTERS = string.ascii_uppercase + string.digits
+
+# Product Type Configuration
+PRODUCT_PREFIXES = {
+    "INTERNAL": f"{BASE_PREFIX}-INT",
+    "SILENT AIM": f"{BASE_PREFIX}-SIA",
+    "AIMKILL": f"{BASE_PREFIX}-AMK"
+}
 
 # Role requirement configuration
 env_role = os.getenv("REQUIRED_ROLE_NAME", "").strip()
@@ -45,10 +57,7 @@ generated_keys: Set[str] = set()
 # HELPER FUNCTIONS
 # ==========================================
 def parse_duration(duration_str: str) -> Tuple[Optional[datetime], str]:
-    """
-    Parses duration string like '1d', '7d', '30d', '12h', '1y', 'lifetime'.
-    Returns (expiration_datetime, formatted_duration_label).
-    """
+    """Parses duration string like '1d', '7d', '30d', '12h', '1y', 'lifetime'."""
     cleaned = duration_str.strip().lower()
     if cleaned in ["lifetime", "never", "perm", "permanent"]:
         return None, "Lifetime"
@@ -107,6 +116,7 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS keys (
                 key TEXT PRIMARY KEY,
+                product_type TEXT DEFAULT 'INTERNAL',
                 assigned_username TEXT,
                 duration TEXT,
                 created_at TEXT NOT NULL,
@@ -118,11 +128,12 @@ def init_db():
         """)
         conn.commit()
 
-        # Database Migration Check: ensure all required columns exist in older tables
+        # Database Migration Check: ensure all required columns exist
         cursor.execute("PRAGMA table_info(keys)")
         existing_cols = {col["name"] for col in cursor.fetchall()}
 
         required_columns = {
+            "product_type": "TEXT DEFAULT 'INTERNAL'",
             "assigned_username": "TEXT",
             "duration": "TEXT",
             "expires_at": "TEXT",
@@ -147,7 +158,7 @@ def init_db():
     print(f"[*] Database initialized: {len(generated_keys)} existing keys loaded.")
 
 
-def save_key_to_db(key: str, assigned_username: str, duration_label: str, expires_at: Optional[datetime], user_id: int, user_name: str):
+def save_key_to_db(key: str, product_type: str, assigned_username: str, duration_label: str, expires_at: Optional[datetime], user_id: int, user_name: str):
     """Saves a generated key to SQLite."""
     now_str = datetime.now(timezone.utc).isoformat()
     expires_str = expires_at.isoformat() if expires_at else "Lifetime"
@@ -155,9 +166,9 @@ def save_key_to_db(key: str, assigned_username: str, duration_label: str, expire
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO keys (key, assigned_username, duration, created_at, expires_at, created_by_id, created_by_name, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-        """, (key, assigned_username, duration_label, now_str, expires_str, user_id, str(user_name)))
+            INSERT INTO keys (key, product_type, assigned_username, duration, created_at, expires_at, created_by_id, created_by_name, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        """, (key, product_type, assigned_username, duration_label, now_str, expires_str, user_id, str(user_name)))
         conn.commit()
 
 
@@ -203,8 +214,12 @@ def fetch_database_stats() -> Tuple[int, int, int]:
 # ==========================================
 # KEY GENERATOR ENGINE
 # ==========================================
-def generate_single_key() -> str:
-    """Generates a cryptographically secure, unique license key."""
+def generate_single_key(prefix: str) -> str:
+    """
+    Generates a cryptographically secure, unique license key with a specific prefix.
+    Example prefixes: ADAMCORP-INT, ADAMCORP-SIA, ADAMCORP-AMK.
+    Output: ADAMCORP-INT7K2P9
+    """
     max_attempts = 1000
     attempts = 0
 
@@ -212,7 +227,7 @@ def generate_single_key() -> str:
         random_section = "".join(
             secrets.choice(ALLOWED_CHARACTERS) for _ in range(KEY_LENGTH)
         )
-        full_key = f"{KEY_PREFIX}-{random_section}"
+        full_key = f"{prefix}{random_section}"
 
         if full_key not in generated_keys:
             generated_keys.add(full_key)
@@ -226,13 +241,18 @@ def generate_single_key() -> str:
 # ==========================================
 # DISCORD MODALS (POP-UP DIALOGS)
 # ==========================================
-class GenerateKeyModal(discord.ui.Modal, title="Generate License Key"):
+class GenerateKeyModal(discord.ui.Modal):
     username_input = discord.ui.TextInput(
         label="Custom Username / Name (Optional)",
         placeholder="Leave blank to auto-generate username",
         required=False,
         max_length=50
     )
+
+    def __init__(self, product_type: str, prefix: str):
+        super().__init__(title=f"Generate Key ({product_type})")
+        self.product_type = product_type
+        self.prefix = prefix
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -247,8 +267,8 @@ class GenerateKeyModal(discord.ui.Modal, title="Generate License Key"):
         try:
             expires_at = None
             duration_label = "Lifetime"
-            key = generate_single_key()
-            save_key_to_db(key, username, duration_label, expires_at, interaction.user.id, str(interaction.user))
+            key = generate_single_key(self.prefix)
+            save_key_to_db(key, self.product_type, username, duration_label, expires_at, interaction.user.id, str(interaction.user))
         except Exception as err:
             await interaction.followup.send(f"❌ Error: {err}", ephemeral=True)
             return
@@ -258,6 +278,7 @@ class GenerateKeyModal(discord.ui.Modal, title="Generate License Key"):
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
+        embed.add_field(name="Product Type", value=f"**{self.product_type}**", inline=True)
         embed.add_field(name="License Key", value=f"`{key}`", inline=False)
         embed.add_field(name="Assigned User", value=username, inline=True)
         embed.add_field(name="Status", value="Active (Lifetime)", inline=True)
@@ -276,7 +297,7 @@ class GenerateKeyModal(discord.ui.Modal, title="Generate License Key"):
 class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
     key_input = discord.ui.TextInput(
         label="License Key",
-        placeholder="Enter key (e.g. ADAMCORP-7K2P9)",
+        placeholder="Enter key (e.g. ADAMCORP-INT7K2P9)",
         required=True,
         max_length=40
     )
@@ -295,11 +316,13 @@ class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc)
         )
+        row_dict = dict(row)
+        product_label = row_dict.get("product_type") or "INTERNAL"
+        embed.add_field(name="Product Type", value=f"**{product_label}**", inline=True)
         embed.add_field(name="Status", value=f"**{str(row['status']).upper()}**", inline=True)
         embed.add_field(name="Assigned User", value=str(row['assigned_username']), inline=True)
         embed.add_field(name="Duration", value=str(row['duration']), inline=True)
         embed.add_field(name="Created At", value=str(row['created_at'])[:19], inline=True)
-        embed.add_field(name="Expires At", value=str(row['expires_at'])[:19], inline=True)
         embed.add_field(name="Created By", value=str(row['created_by_name']), inline=True)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -308,7 +331,7 @@ class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
 class DeleteKeyModal(discord.ui.Modal, title="Delete License Key"):
     key_input = discord.ui.TextInput(
         label="License Key to Delete",
-        placeholder="Enter key (e.g. ADAMCORP-7K2P9)",
+        placeholder="Enter key to remove",
         required=True,
         max_length=40
     )
@@ -322,6 +345,50 @@ class DeleteKeyModal(discord.ui.Modal, title="Delete License Key"):
             await interaction.followup.send(f"✅ License key `{key_str}` has been deleted from database.", ephemeral=True)
         else:
             await interaction.followup.send(f"❌ License key `{key_str}` was not found in database.", ephemeral=True)
+
+
+# ==========================================
+# PRODUCT SELECTION DROPDOWN VIEW
+# ==========================================
+class ProductSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="INTERNAL",
+                value="INTERNAL",
+                description="Format: ADAMCORP-INTxxxx",
+                emoji="🎯"
+            ),
+            discord.SelectOption(
+                label="SILENT AIM",
+                value="SILENT AIM",
+                description="Format: ADAMCORP-SIAxxxx",
+                emoji="🎯"
+            ),
+            discord.SelectOption(
+                label="AIMKILL",
+                value="AIMKILL",
+                description="Format: ADAMCORP-AMKxxxx",
+                emoji="🎯"
+            )
+        ]
+        super().__init__(
+            placeholder="Select a Product Type...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        product_type = self.values[0]
+        prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
+        await interaction.response.send_modal(GenerateKeyModal(product_type, prefix))
+
+
+class ProductSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(ProductSelect())
 
 
 # ==========================================
@@ -345,7 +412,13 @@ class LicensePanelView(discord.ui.View):
                 ephemeral=True
             )
             return
-        await interaction.response.send_modal(GenerateKeyModal())
+
+        # Prompt user to select product type first
+        await interaction.response.send_message(
+            "Select the **Product Type** for the license key you wish to generate:",
+            view=ProductSelectView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(
         label="Key Info",
@@ -413,11 +486,9 @@ async def on_ready():
     bot.add_view(LicensePanelView())
 
     try:
-        # Sync globally first
         synced_global = await bot.tree.sync()
         print(f"[+] Synced {len(synced_global)} slash command(s) globally.")
 
-        # Sync instantly to all joined guilds so commands appear immediately
         for guild in bot.guilds:
             try:
                 bot.tree.copy_global_to(guild=guild)
@@ -448,8 +519,8 @@ async def panel_command(interaction: discord.Interaction):
     embed = discord.Embed(
         description=(
             "All key actions in one place — results are **private** to you.\n\n"
-            "> **Generate** — username ➔ duration ➔ confirm generate\n"
-            "> **Key Info** — check status and expiry\n"
+            "> **Generate** — Select Product (INTERNAL / SILENT AIM / AIMKILL) ➔ confirm generate\n"
+            "> **Key Info** — check status and product type\n"
             "> **Delete Key** — remove a key *(owner / admin)*\n\n"
             f"*You need the **{REQUIRED_ROLE_NAME}** role to generate keys.*"
         ),
@@ -464,16 +535,23 @@ async def panel_command(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="generate",
-    description="Generate unique license keys (e.g. ADAMCORP-7K2P9)."
+    description="Generate unique license keys for a specific product."
 )
+@app_commands.choices(product=[
+    app_commands.Choice(name="INTERNAL (ADAMCORP-INTxxxx)", value="INTERNAL"),
+    app_commands.Choice(name="SILENT AIM (ADAMCORP-SIAxxxx)", value="SILENT AIM"),
+    app_commands.Choice(name="AIMKILL (ADAMCORP-AMKxxxx)", value="AIMKILL")
+])
 @app_commands.describe(
+    product="Select product type (INTERNAL, SILENT AIM, or AIMKILL).",
     amount="Number of unique keys to generate (1 to 20). Default is 1."
 )
 async def generate_command(
     interaction: discord.Interaction,
+    product: app_commands.Choice[str],
     amount: Optional[app_commands.Range[int, 1, 20]] = 1
 ):
-    """Slash command: /generate [amount]"""
+    """Slash command: /generate [product] [amount]"""
     if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
         await interaction.response.send_message(
             f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to generate keys.",
@@ -481,25 +559,28 @@ async def generate_command(
         )
         return
 
+    product_type = product.value
+    prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
     amount_val = amount if amount is not None else 1
+
     await interaction.response.defer(ephemeral=True)
 
     try:
         keys = []
         for _ in range(amount_val):
-            k = generate_single_key()
-            save_key_to_db(k, "Unassigned", "Lifetime", None, interaction.user.id, str(interaction.user))
+            k = generate_single_key(prefix)
+            save_key_to_db(k, product_type, "Unassigned", "Lifetime", None, interaction.user.id, str(interaction.user))
             keys.append(k)
     except Exception as err:
         await interaction.followup.send(f"❌ Error generating keys: {err}", ephemeral=True)
         return
 
     if amount_val == 1:
-        response_text = f"Your generated key: `{keys[0]}`"
+        response_text = f"Your generated **{product_type}** key: `{keys[0]}`"
     else:
         formatted_list = "\n".join(keys)
         response_text = (
-            f"Generated **{amount_val}** unique keys:\n"
+            f"Generated **{amount_val}** unique **{product_type}** keys:\n"
             f"```text\n{formatted_list}\n```"
         )
 
