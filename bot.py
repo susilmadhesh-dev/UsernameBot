@@ -46,7 +46,8 @@ PRODUCT_PREFIXES = {
 
 # Role requirement configuration
 env_role = os.getenv("REQUIRED_ROLE_NAME", "").strip()
-REQUIRED_ROLE_NAME = env_role if env_role else "Reseller"
+REQUIRED_ROLE_NAME = env_role if env_role else "key"
+ALLOWED_ROLE_NAMES = {"key", "reseller", REQUIRED_ROLE_NAME.lower()}
 
 # KeyAuth Seller API Configuration
 KEYAUTH_SELLER_KEY = os.getenv("KEYAUTH_SELLER_KEY", "").strip()
@@ -170,17 +171,12 @@ def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
 
 
 def check_user_permission(member: discord.Member) -> bool:
-    """Checks if the user has Administrator permissions or the REQUIRED_ROLE_NAME role."""
+    """Checks if the user has Administrator permissions or the 'key' role."""
     if getattr(member.guild_permissions, "administrator", False):
         return True
 
-    if REQUIRED_ROLE_NAME:
-        return any(
-            role.name.lower() == REQUIRED_ROLE_NAME.lower()
-            for role in getattr(member, "roles", [])
-        )
-
-    return True
+    user_roles = {role.name.lower() for role in getattr(member, "roles", [])}
+    return bool(user_roles & ALLOWED_ROLE_NAMES)
 
 
 # ==========================================
@@ -667,6 +663,23 @@ async def on_ready():
     # Register persistent button view
     bot.add_view(LicensePanelView())
 
+    # Auto-create 'key' role in connected guilds if missing
+    for guild in bot.guilds:
+        existing_role = discord.utils.find(lambda r: r.name.lower() == "key", guild.roles)
+        if not existing_role:
+            try:
+                created_role = await guild.create_role(
+                    name="key",
+                    color=discord.Color.gold(),
+                    mentionable=True,
+                    reason="Role for license key creation access"
+                )
+                print(f"[+] Created role 'key' in '{guild.name}' (ID: {guild.id})")
+            except Exception as re:
+                print(f"[!] Notice: Could not auto-create role 'key' in '{guild.name}': {re}")
+        else:
+            print(f"[*] Role 'key' already exists in '{guild.name}'.")
+
     try:
         synced_global = await bot.tree.sync()
         print(f"[+] Synced {len(synced_global)} slash command(s) globally.")
@@ -855,6 +868,47 @@ async def stats_command(interaction: discord.Interaction):
     embed.set_footer(text=f"Requested by {interaction.user}")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="create_role",
+    description="Create or verify the 'key' role for license generation access."
+)
+async def create_role_command(interaction: discord.Interaction):
+    """Creates the 'key' role in the server if it does not already exist."""
+    if not interaction.guild:
+        await interaction.response.send_message("❌ This command must be run inside a Discord server.", ephemeral=True)
+        return
+
+    if isinstance(interaction.user, discord.Member) and not getattr(interaction.user.guild_permissions, "administrator", False):
+        await interaction.response.send_message("❌ Only Administrators can use `/create_role`.", ephemeral=True)
+        return
+
+    existing_role = discord.utils.find(lambda r: r.name.lower() == "key", interaction.guild.roles)
+    if existing_role:
+        await interaction.response.send_message(f"✅ The **key** role already exists: {existing_role.mention}. Assign this role to members who should generate keys.", ephemeral=True)
+        return
+
+    try:
+        new_role = await interaction.guild.create_role(
+            name="key",
+            color=discord.Color.gold(),
+            mentionable=True,
+            reason=f"Created by {interaction.user} via /create_role"
+        )
+        await interaction.response.send_message(
+            f"✅ Successfully created role: {new_role.mention}!\n"
+            f"Members given this role can now create keys from the panel.",
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ The bot needs the **Manage Roles** permission to create roles automatically. "
+            "Please create a role named `key` manually in Server Settings ➔ Roles, or grant the bot Manage Roles.",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to create role: {e}", ephemeral=True)
 
 
 # ==========================================
