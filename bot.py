@@ -345,13 +345,13 @@ def generate_single_key(prefix: str) -> str:
 class GenerateKeyModal(discord.ui.Modal):
     username_input = discord.ui.TextInput(
         label="Username (Optional)",
-        placeholder="Leave blank to auto-generate (User-XXXX)",
+        placeholder="Leave blank to use License Key",
         required=False,
         max_length=50
     )
     password_input = discord.ui.TextInput(
         label="Password (Optional)",
-        placeholder="Leave blank to use same as username",
+        placeholder="Leave blank to use License Key",
         required=False,
         max_length=50
     )
@@ -381,18 +381,6 @@ class GenerateKeyModal(discord.ui.Modal):
         user_input_val = self.username_input.value.strip() if self.username_input.value else ""
         pass_input_val = self.password_input.value.strip() if self.password_input.value else ""
         hwid_val = self.hwid_input.value.strip() if self.hwid_input.value else "Yes (Locked on First Use)"
-
-        # Username & Password handling:
-        # If username is not given -> auto-generate User-XXXX
-        # If password is not given -> default to same as username
-        if not user_input_val:
-            auto_tag = "".join(secrets.choice(ALLOWED_CHARACTERS) for _ in range(4))
-            username = f"User-{auto_tag}"
-            password = pass_input_val if pass_input_val else username
-        else:
-            username = user_input_val
-            password = pass_input_val if pass_input_val else username
-
         raw_expiration = self.expiration_input.value.strip()
 
         try:
@@ -401,6 +389,10 @@ class GenerateKeyModal(discord.ui.Modal):
         except Exception as err:
             await interaction.followup.send(f"❌ Error: {err}", ephemeral=True)
             return
+
+        # License key is used as username and password if not explicitly provided
+        username = user_input_val if user_input_val else key
+        password = pass_input_val if pass_input_val else (user_input_val if user_input_val else key)
 
         # Attempt KeyAuth Seller API Sync if configured
         keyauth_synced = 0
@@ -768,10 +760,9 @@ async def generate_command(
     hwid_val = "Yes (Locked on First Use)"
 
     for _ in range(amount_val):
-        auto_tag = "".join(secrets.choice(ALLOWED_CHARACTERS) for _ in range(4))
-        username = f"User-{auto_tag}"
-        password = username  # Default password same as username
         key = generate_single_key(prefix)
+        username = key
+        password = key
 
         keyauth_synced = 0
         if KEYAUTH_SELLER_KEY:
