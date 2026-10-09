@@ -2,7 +2,8 @@
 Discord License Key Management Bot
 -----------------------------------
 A discord.py bot with an interactive button panel, product selection dropdown,
-pop-up modals, SQLite database persistence, and DM key delivery.
+pop-up modals, SQLite database persistence, KeyAuth Seller API integration,
+custom username/password generation, HWID protection, and DM delivery.
 
 Supports 3 Product Types:
 - INTERNAL   (Prefix: ADAMCORP-INT)
@@ -15,6 +16,7 @@ import re
 import string
 import secrets
 import sqlite3
+import aiohttp
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Set, Tuple, List, Dict, Any
 import discord
@@ -46,6 +48,9 @@ PRODUCT_PREFIXES = {
 env_role = os.getenv("REQUIRED_ROLE_NAME", "").strip()
 REQUIRED_ROLE_NAME = env_role if env_role else "Reseller"
 
+# KeyAuth Seller API Configuration
+KEYAUTH_SELLER_KEY = os.getenv("KEYAUTH_SELLER_KEY", "").strip()
+
 # SQLite Database Path
 DB_PATH = "licenses.db"
 
@@ -54,35 +59,114 @@ generated_keys: Set[str] = set()
 
 
 # ==========================================
+# KEYAUTH SELLER API INTEGRATION
+# ==========================================
+async def sync_keyauth_user(username: str, password: str, sub_name: str, expiry_days: int) -> Dict[str, Any]:
+    """
+    Communicates asynchronously with KeyAuth Seller API to register/add user.
+    Endpoint: https://keyauth.win/api/seller/?sellerkey=...&type=adduser&user=...&pass=...&sub=...&expiry=...
+    """
+    if not KEYAUTH_SELLER_KEY:
+        return {"configured": False, "success": True, "message": "KeyAuth Seller Key not set (local mode active)"}
+
+    url = "https://keyauth.win/api/seller/"
+    params = {
+        "sellerkey": KEYAUTH_SELLER_KEY,
+        "type": "adduser",
+        "user": username,
+        "pass": password,
+        "sub": sub_name,
+        "expiry": str(expiry_days)
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                data = await resp.json(content_type=None)
+                success = bool(data.get("success", False))
+                msg = data.get("message", "User added to KeyAuth" if success else "Failed to add to KeyAuth")
+                return {
+                    "configured": True,
+                    "success": success,
+                    "message": msg
+                }
+    except Exception as e:
+        return {
+            "configured": True,
+            "success": False,
+            "message": f"Connection error: {e}"
+        }
+
+
+# ==========================================
 # HELPER FUNCTIONS
 # ==========================================
-def parse_duration(duration_str: str) -> Tuple[Optional[datetime], str]:
-    """Parses duration string like '1d', '7d', '30d', '12h', '1y', 'lifetime'."""
-    cleaned = duration_str.strip().lower()
-    if cleaned in ["lifetime", "never", "perm", "permanent"]:
-        return None, "Lifetime"
+def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
+    """
+    Parses expiration input.
+    Supports:
+    1. Exact Date and Time in DD/MM/YYYY HH:MM or DD/MM/YYYY
+       e.g. '25/12/2026 18:30' or '25/12/2026'
+    2. Relative durations like '1d', '7d', '30d', '12h', '1y'
+    3. 'lifetime', 'never', 'perm'
+    Returns: (expires_at_datetime, display_label_dd_mm_yyyy_hh_mm, expiry_days_for_keyauth)
+    """
+    cleaned = raw_str.strip()
 
-    match = re.match(r"^(\d+)\s*([dhmy]?)$", cleaned)
-    if not match:
-        if cleaned.isdigit():
-            days = int(cleaned)
-            return datetime.now(timezone.utc) + timedelta(days=days), f"{days} Day(s)"
-        raise ValueError("Invalid duration format. Use e.g. '7d', '30d', '12h', '1y', or 'lifetime'.")
+    # 1. Exact Date / Time check: DD/MM/YYYY HH:MM or DD/MM/YYYY or DD-MM-YYYY
+    date_match = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$", cleaned)
+    if date_match:
+        day = int(date_match.group(1))
+        month = int(date_match.group(2))
+        year = int(date_match.group(3))
+        hour = int(date_match.group(4)) if date_match.group(4) is not None else 23
+        minute = int(date_match.group(5)) if date_match.group(5) is not None else 59
+        try:
+            exp_dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        except ValueError as ve:
+            raise ValueError(f"Invalid date/time value: {ve}")
 
-    num = int(match.group(1))
-    unit = match.group(2) or "d"
+        now = datetime.now(timezone.utc)
+        if exp_dt < now:
+            raise ValueError("Expiration date/time cannot be in the past!")
 
+        diff_days = max(1, (exp_dt - now).days)
+        return exp_dt, exp_dt.strftime("%d/%m/%Y %H:%M"), diff_days
+
+    # 2. Lifetime check
+    lower = cleaned.lower()
+    if lower in ["lifetime", "never", "perm", "permanent"]:
+        return None, "Lifetime (Never Expires)", 99999
+
+    # 3. Relative duration check
+    rel_match = re.match(r"^(\d+)\s*([dhmy]?)$", lower)
+    if not rel_match:
+        if lower.isdigit():
+            num = int(lower)
+            exp_dt = datetime.now(timezone.utc) + timedelta(days=num)
+            return exp_dt, exp_dt.strftime("%d/%m/%Y %H:%M"), num
+        raise ValueError("Invalid format. Use DD/MM/YYYY HH:MM (e.g. 25/12/2026 18:30) or '7d', '30d', 'lifetime'.")
+
+    num = int(rel_match.group(1))
+    unit = rel_match.group(2) or "d"
     now = datetime.now(timezone.utc)
     if unit == "h":
-        return now + timedelta(hours=num), f"{num} Hour(s)"
+        exp_dt = now + timedelta(hours=num)
+        days = max(1, num // 24)
     elif unit == "d":
-        return now + timedelta(days=num), f"{num} Day(s)"
+        exp_dt = now + timedelta(days=num)
+        days = num
     elif unit == "m":
-        return now + timedelta(days=num * 30), f"{num} Month(s)"
+        exp_dt = now + timedelta(days=num * 30)
+        days = num * 30
     elif unit == "y":
-        return now + timedelta(days=num * 365), f"{num} Year(s)"
+        exp_dt = now + timedelta(days=num * 365)
+        days = num * 365
+    else:
+        exp_dt = now + timedelta(days=num)
+        days = num
 
-    return now + timedelta(days=num), f"{num} Day(s)"
+    return exp_dt, exp_dt.strftime("%d/%m/%Y %H:%M"), days
 
 
 def check_user_permission(member: discord.Member) -> bool:
@@ -118,12 +202,15 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 product_type TEXT DEFAULT 'INTERNAL',
                 assigned_username TEXT,
+                password TEXT,
+                hwid TEXT DEFAULT 'Yes (Locked on First Use)',
                 duration TEXT,
                 created_at TEXT NOT NULL,
                 expires_at TEXT,
                 created_by_id INTEGER NOT NULL,
                 created_by_name TEXT NOT NULL,
-                status TEXT DEFAULT 'active'
+                status TEXT DEFAULT 'active',
+                keyauth_synced INTEGER DEFAULT 0
             )
         """)
         conn.commit()
@@ -135,9 +222,12 @@ def init_db():
         required_columns = {
             "product_type": "TEXT DEFAULT 'INTERNAL'",
             "assigned_username": "TEXT",
+            "password": "TEXT",
+            "hwid": "TEXT DEFAULT 'Yes (Locked on First Use)'",
             "duration": "TEXT",
             "expires_at": "TEXT",
-            "status": "TEXT DEFAULT 'active'"
+            "status": "TEXT DEFAULT 'active'",
+            "keyauth_synced": "INTEGER DEFAULT 0"
         }
 
         for col_name, col_type in required_columns.items():
@@ -158,17 +248,28 @@ def init_db():
     print(f"[*] Database initialized: {len(generated_keys)} existing keys loaded.")
 
 
-def save_key_to_db(key: str, product_type: str, assigned_username: str, duration_label: str, expires_at: Optional[datetime], user_id: int, user_name: str):
-    """Saves a generated key to SQLite."""
-    now_str = datetime.now(timezone.utc).isoformat()
-    expires_str = expires_at.isoformat() if expires_at else "Lifetime"
+def save_key_to_db(
+    key: str,
+    product_type: str,
+    assigned_username: str,
+    password: str,
+    hwid: str,
+    duration_label: str,
+    expires_at: Optional[datetime],
+    user_id: int,
+    user_name: str,
+    keyauth_synced: int = 0
+):
+    """Saves a generated key and account credentials to SQLite."""
+    now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S")
+    expires_str = expires_at.strftime("%d/%m/%Y %H:%M") if expires_at else "Lifetime"
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO keys (key, product_type, assigned_username, duration, created_at, expires_at, created_by_id, created_by_name, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
-        """, (key, product_type, assigned_username, duration_label, now_str, expires_str, user_id, str(user_name)))
+            INSERT INTO keys (key, product_type, assigned_username, password, hwid, duration, created_at, expires_at, created_by_id, created_by_name, status, keyauth_synced)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """, (key, product_type, assigned_username, password, hwid, duration_label, now_str, expires_str, user_id, str(user_name), keyauth_synced))
         conn.commit()
 
 
@@ -243,17 +344,30 @@ def generate_single_key(prefix: str) -> str:
 # ==========================================
 class GenerateKeyModal(discord.ui.Modal):
     username_input = discord.ui.TextInput(
-        label="Custom Username / Name (Optional)",
-        placeholder="Leave blank to auto-generate username",
+        label="Username (Optional)",
+        placeholder="Leave blank to auto-generate (User-XXXX)",
         required=False,
         max_length=50
     )
-    duration_input = discord.ui.TextInput(
-        label="Duration",
-        placeholder="e.g. 1d, 7d, 30d, 12h, 1y, lifetime",
+    password_input = discord.ui.TextInput(
+        label="Password (Optional)",
+        placeholder="Leave blank to use same as username",
+        required=False,
+        max_length=50
+    )
+    expiration_input = discord.ui.TextInput(
+        label="Expiration (DD/MM/YYYY HH:MM or 7d)",
+        placeholder="e.g. 25/12/2026 18:30 or 7d, 30d, lifetime",
         default="7d",
         required=True,
-        max_length=20
+        max_length=30
+    )
+    hwid_input = discord.ui.TextInput(
+        label="HWID Lock / Affected",
+        placeholder="Leave blank for default (Locked on 1st Login)",
+        default="Yes (Locked on First Use)",
+        required=False,
+        max_length=50
     )
 
     def __init__(self, product_type: str, prefix: str):
@@ -265,44 +379,111 @@ class GenerateKeyModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
 
         user_input_val = self.username_input.value.strip() if self.username_input.value else ""
+        pass_input_val = self.password_input.value.strip() if self.password_input.value else ""
+        hwid_val = self.hwid_input.value.strip() if self.hwid_input.value else "Yes (Locked on First Use)"
+
+        # Username & Password handling:
+        # If username is not given -> auto-generate User-XXXX
+        # If password is not given -> default to same as username
         if not user_input_val:
             auto_tag = "".join(secrets.choice(ALLOWED_CHARACTERS) for _ in range(4))
             username = f"User-{auto_tag}"
+            password = pass_input_val if pass_input_val else username
         else:
             username = user_input_val
+            password = pass_input_val if pass_input_val else username
 
-        duration_raw = self.duration_input.value.strip()
+        raw_expiration = self.expiration_input.value.strip()
 
         try:
-            expires_at, duration_label = parse_duration(duration_raw)
+            expires_at, expires_display, expiry_days = parse_expiration(raw_expiration)
             key = generate_single_key(self.prefix)
-            save_key_to_db(key, self.product_type, username, duration_label, expires_at, interaction.user.id, str(interaction.user))
         except Exception as err:
             await interaction.followup.send(f"❌ Error: {err}", ephemeral=True)
             return
 
-        expires_display = expires_at.strftime("%Y-%m-%d %H:%M:%S UTC") if expires_at else "Lifetime"
+        # Attempt KeyAuth Seller API Sync if configured
+        keyauth_synced = 0
+        keyauth_info = "Local Key Storage (KeyAuth Seller Key not set)"
+        if KEYAUTH_SELLER_KEY:
+            sync_res = await sync_keyauth_user(username, password, self.product_type, expiry_days)
+            if sync_res.get("success"):
+                keyauth_synced = 1
+                keyauth_info = "✅ Synced to KeyAuth"
+            else:
+                keyauth_info = f"⚠️ KeyAuth Notice: {sync_res.get('message')}"
 
-        embed = discord.Embed(
-            title="🔑 Key Generated Successfully",
+        # Save to SQLite database
+        try:
+            save_key_to_db(
+                key=key,
+                product_type=self.product_type,
+                assigned_username=username,
+                password=password,
+                hwid=hwid_val,
+                duration_label=expires_display,
+                expires_at=expires_at,
+                user_id=interaction.user.id,
+                user_name=str(interaction.user),
+                keyauth_synced=keyauth_synced
+            )
+        except Exception as db_err:
+            await interaction.followup.send(f"❌ Database error: {db_err}", ephemeral=True)
+            return
+
+        # Build DM credentials embed
+        dm_delivered = True
+        try:
+            embed_dm = discord.Embed(
+                title="🔑 Your License Key & Account Credentials",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed_dm.add_field(name="Product Type", value=f"**{self.product_type}**", inline=True)
+            embed_dm.add_field(name="License Key", value=f"`{key}`", inline=False)
+            embed_dm.add_field(name="👤 Username", value=f"`{username}`", inline=True)
+            embed_dm.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
+            embed_dm.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_display}`", inline=False)
+            embed_dm.add_field(name="💻 HWID Affected", value=f"`{hwid_val}`", inline=True)
+            embed_dm.add_field(name="🌐 KeyAuth Status", value=keyauth_info, inline=True)
+            embed_dm.add_field(
+                name="📋 Quick Copy Credentials",
+                value=f"```text\nKey:      {key}\nUsername: {username}\nPassword: {password}\nExpires:  {expires_display}\nHWID:     {hwid_val}\n```",
+                inline=False
+            )
+            embed_dm.set_footer(text="Keep your credentials safe! Do not share your password.")
+            await interaction.user.send(embed=embed_dm)
+        except Exception as dme:
+            dm_delivered = False
+            print(f"[!] DM delivery notice for {interaction.user}: {dme}")
+
+        # Send response in channel (visible privately to user)
+        embed_channel = discord.Embed(
+            title="🔑 License Key & Credentials Generated",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
-        embed.add_field(name="Product Type", value=f"**{self.product_type}**", inline=True)
-        embed.add_field(name="License Key", value=f"`{key}`", inline=False)
-        embed.add_field(name="Assigned User", value=username, inline=True)
-        embed.add_field(name="Duration", value=duration_label, inline=True)
-        embed.add_field(name="Expires At", value=expires_display, inline=True)
-        embed.set_footer(text=f"Generated by {interaction.user}")
+        embed_channel.add_field(name="Product Type", value=f"**{self.product_type}**", inline=True)
+        embed_channel.add_field(name="License Key", value=f"`{key}`", inline=False)
+        embed_channel.add_field(name="👤 Username", value=f"`{username}`", inline=True)
+        embed_channel.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
+        embed_channel.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_display}`", inline=False)
+        embed_channel.add_field(name="💻 HWID Affected", value=f"`{hwid_val}`", inline=True)
+        embed_channel.add_field(name="🌐 KeyAuth Status", value=keyauth_info, inline=True)
+        embed_channel.add_field(
+            name="📋 Quick Copy Credentials",
+            value=f"```text\nKey:      {key}\nUsername: {username}\nPassword: {password}\nExpires:  {expires_display}\nHWID:     {hwid_val}\n```",
+            inline=False
+        )
 
-        # Always display key in the channel (private to the user)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        footer_text = f"Generated by {interaction.user}"
+        if dm_delivered:
+            footer_text += " • ✅ Also sent to your DMs"
+        else:
+            footer_text += " • ⚠️ DM delivery failed (check privacy settings)"
+        embed_channel.set_footer(text=footer_text)
 
-        # ALSO send key to user's Direct Messages (DM)
-        try:
-            await interaction.user.send(embed=embed)
-        except Exception as dme:
-            print(f"[!] DM delivery notice: {dme}")
+        await interaction.followup.send(embed=embed_channel, ephemeral=True)
 
 
 class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
@@ -322,17 +503,27 @@ class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
             await interaction.followup.send(f"❌ License key `{key_str}` was not found in database.", ephemeral=True)
             return
 
+        row_dict = dict(row)
         embed = discord.Embed(
-            title=f"🔍 Key Information: {row['key']}",
+            title=f"🔍 Key Details: {row['key']}",
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc)
         )
-        row_dict = dict(row)
         product_label = row_dict.get("product_type") or "INTERNAL"
+        username_val = row_dict.get("assigned_username") or "N/A"
+        password_val = row_dict.get("password") or "N/A"
+        hwid_val = row_dict.get("hwid") or "Yes (Locked on First Use)"
+        duration_val = row_dict.get("duration") or "N/A"
+        expires_val = row_dict.get("expires_at") or duration_val
+        synced_val = "✅ Synced to KeyAuth" if row_dict.get("keyauth_synced") else "Local Mode"
+
         embed.add_field(name="Product Type", value=f"**{product_label}**", inline=True)
         embed.add_field(name="Status", value=f"**{str(row['status']).upper()}**", inline=True)
-        embed.add_field(name="Assigned User", value=str(row['assigned_username']), inline=True)
-        embed.add_field(name="Duration", value=str(row['duration']), inline=True)
+        embed.add_field(name="HWID Affected", value=f"`{hwid_val}`", inline=True)
+        embed.add_field(name="👤 Username", value=f"`{username_val}`", inline=True)
+        embed.add_field(name="🔒 Password", value=f"`{password_val}`", inline=True)
+        embed.add_field(name="🌐 KeyAuth Sync", value=synced_val, inline=True)
+        embed.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_val}`", inline=True)
         embed.add_field(name="Created At", value=str(row['created_at'])[:19], inline=True)
         embed.add_field(name="Created By", value=str(row['created_by_name']), inline=True)
 
@@ -507,7 +698,7 @@ async def on_ready():
     description="Display the License Management Control Panel."
 )
 async def panel_command(interaction: discord.Interaction):
-    """Slash command to post the license management control panel embed with buttons."""
+    """Slash command to post the license management control panel embed with dropdown & buttons."""
     if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
         await interaction.response.send_message(
             f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to use `/panel`.",
@@ -518,9 +709,9 @@ async def panel_command(interaction: discord.Interaction):
     embed = discord.Embed(
         description=(
             "All key actions in one place — results are **private** to you.\n\n"
-            "> **Generate** — Select Product (INTERNAL / SILENT AIM / AIMKILL) ➔ confirm generate\n"
-            "> **Key Info** — check status and product type\n"
-            "> **Delete Key** — remove a key *(owner / admin)*\n\n"
+            "> **Select Product** — Choose (INTERNAL / SILENT AIM / AIMKILL) to generate\n"
+            "> **Key Info** — Check status, username, password, HWID, and expiration\n"
+            "> **Delete Key** — Remove a key *(owner / admin)*\n\n"
             f"*You need the **{REQUIRED_ROLE_NAME}** role to generate keys.*"
         ),
         color=discord.Color.dark_theme()
@@ -534,7 +725,7 @@ async def panel_command(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="generate",
-    description="Generate unique license keys for a specific product."
+    description="Generate unique license keys and credentials for a specific product."
 )
 @app_commands.choices(product=[
     app_commands.Choice(name="INTERNAL (ADAMCORP-INTxxxx)", value="INTERNAL"),
@@ -543,14 +734,16 @@ async def panel_command(interaction: discord.Interaction):
 ])
 @app_commands.describe(
     product="Select product type (INTERNAL, SILENT AIM, or AIMKILL).",
-    amount="Number of unique keys to generate (1 to 20). Default is 1."
+    amount="Number of unique keys to generate (1 to 20). Default is 1.",
+    expiration="Expiration e.g. '25/12/2026 18:30' or '7d', '30d', 'lifetime'. Default is '7d'."
 )
 async def generate_command(
     interaction: discord.Interaction,
     product: app_commands.Choice[str],
-    amount: Optional[app_commands.Range[int, 1, 20]] = 1
+    amount: Optional[app_commands.Range[int, 1, 20]] = 1,
+    expiration: Optional[str] = "7d"
 ):
-    """Slash command: /generate [product] [amount]"""
+    """Slash command: /generate [product] [amount] [expiration]"""
     if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
         await interaction.response.send_message(
             f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to generate keys.",
@@ -561,36 +754,87 @@ async def generate_command(
     product_type = product.value
     prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
     amount_val = amount if amount is not None else 1
+    exp_str = expiration if expiration else "7d"
 
     await interaction.response.defer(ephemeral=True)
 
     try:
-        keys = []
-        for _ in range(amount_val):
-            k = generate_single_key(prefix)
-            save_key_to_db(k, product_type, "Unassigned", "Lifetime", None, interaction.user.id, str(interaction.user))
-            keys.append(k)
+        expires_at, expires_display, expiry_days = parse_expiration(exp_str)
     except Exception as err:
-        await interaction.followup.send(f"❌ Error generating keys: {err}", ephemeral=True)
+        await interaction.followup.send(f"❌ Invalid expiration format: {err}", ephemeral=True)
         return
 
-    if amount_val == 1:
-        response_text = f"Your generated **{product_type}** key: `{keys[0]}`"
-    else:
-        formatted_list = "\n".join(keys)
-        response_text = (
-            f"Generated **{amount_val}** unique **{product_type}** keys:\n"
-            f"```text\n{formatted_list}\n```"
+    generated_items = []
+    hwid_val = "Yes (Locked on First Use)"
+
+    for _ in range(amount_val):
+        auto_tag = "".join(secrets.choice(ALLOWED_CHARACTERS) for _ in range(4))
+        username = f"User-{auto_tag}"
+        password = username  # Default password same as username
+        key = generate_single_key(prefix)
+
+        keyauth_synced = 0
+        if KEYAUTH_SELLER_KEY:
+            sync_res = await sync_keyauth_user(username, password, product_type, expiry_days)
+            if sync_res.get("success"):
+                keyauth_synced = 1
+
+        save_key_to_db(
+            key=key,
+            product_type=product_type,
+            assigned_username=username,
+            password=password,
+            hwid=hwid_val,
+            duration_label=expires_display,
+            expires_at=expires_at,
+            user_id=interaction.user.id,
+            user_name=str(interaction.user),
+            keyauth_synced=keyauth_synced
         )
 
-    # Always display key in the channel (private to the user)
-    await interaction.followup.send(response_text, ephemeral=True)
+        generated_items.append({
+            "key": key,
+            "username": username,
+            "password": password,
+            "expires": expires_display,
+            "hwid": hwid_val
+        })
 
-    # ALSO send key to user's Direct Messages (DM)
-    try:
-        await interaction.user.send(response_text)
-    except Exception as dme:
-        print(f"[!] DM delivery notice: {dme}")
+    if amount_val == 1:
+        item = generated_items[0]
+        embed = discord.Embed(
+            title="🔑 License Key & Credentials Generated",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.add_field(name="Product Type", value=f"**{product_type}**", inline=True)
+        embed.add_field(name="License Key", value=f"`{item['key']}`", inline=False)
+        embed.add_field(name="👤 Username", value=f"`{item['username']}`", inline=True)
+        embed.add_field(name="🔒 Password", value=f"`{item['password']}`", inline=True)
+        embed.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{item['expires']}`", inline=False)
+        embed.add_field(name="💻 HWID Affected", value=f"`{item['hwid']}`", inline=True)
+        embed.add_field(
+            name="📋 Quick Copy Credentials",
+            value=f"```text\nKey:      {item['key']}\nUsername: {item['username']}\nPassword: {item['password']}\nExpires:  {item['expires']}\nHWID:     {item['hwid']}\n```",
+            inline=False
+        )
+        embed.set_footer(text=f"Generated for {interaction.user}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            await interaction.user.send(embed=embed)
+        except Exception:
+            pass
+    else:
+        text_lines = []
+        for i, item in enumerate(generated_items, 1):
+            text_lines.append(f"[{i}] Key: {item['key']} | User: {item['username']} | Pass: {item['password']} | Exp: {item['expires']} | HWID: {item['hwid']}")
+
+        result_text = f"**Generated {amount_val} {product_type} Licenses & Accounts:**\n```text\n" + "\n".join(text_lines) + "\n```"
+        await interaction.followup.send(result_text, ephemeral=True)
+        try:
+            await interaction.user.send(result_text)
+        except Exception:
+            pass
 
 
 @bot.tree.command(
@@ -616,6 +860,7 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(name="Total Keys Generated", value=str(total), inline=True)
     embed.add_field(name="Active Keys", value=str(active), inline=True)
     embed.add_field(name="Expired Keys", value=str(expired), inline=True)
+    embed.add_field(name="KeyAuth Integration", value="Active" if KEYAUTH_SELLER_KEY else "Local Mode", inline=True)
     embed.set_footer(text=f"Requested by {interaction.user}")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
