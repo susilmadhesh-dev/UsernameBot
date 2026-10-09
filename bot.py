@@ -51,11 +51,6 @@ PRODUCT_PREFIXES = {
     "AIMKILL": f"{BASE_PREFIX}-AMK"
 }
 
-# Role requirement configuration
-env_role = os.getenv("REQUIRED_ROLE_NAME", "").strip()
-REQUIRED_ROLE_NAME = env_role if env_role else "key"
-ALLOWED_ROLE_NAMES = {"key", "reseller", REQUIRED_ROLE_NAME.lower()}
-
 # KeyAuth Seller API Configuration
 KEYAUTH_SELLER_KEY = os.getenv("KEYAUTH_SELLER_KEY", "").strip()
 
@@ -175,49 +170,6 @@ def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
         days = num
 
     return exp_dt, exp_dt.strftime("%d/%m/%Y %H:%M"), days
-
-
-async def check_user_permission(interaction: discord.Interaction) -> bool:
-    """
-    Checks if the interacting user has permission to generate or manage keys.
-    Grants access if:
-    1. User is the Server Owner
-    2. User has Administrator permissions
-    3. User has the 'key' role (or 'reseller', or any role name containing 'key')
-    """
-    if not interaction.guild:
-        return True
-
-    # 1. Server Owner
-    if interaction.user.id == interaction.guild.owner_id:
-        return True
-
-    # 2. Administrator permission on interaction
-    if getattr(interaction.permissions, "administrator", False):
-        return True
-
-    # 3. Fetch live member from Discord API to avoid stale role cache
-    member = interaction.user
-    try:
-        member = await interaction.guild.fetch_member(interaction.user.id)
-    except Exception:
-        member = interaction.guild.get_member(interaction.user.id) or interaction.user
-
-    # 4. Check Administrator on member
-    if getattr(member, "guild_permissions", None) and member.guild_permissions.administrator:
-        return True
-
-    # 5. Check role names
-    member_roles = getattr(member, "roles", [])
-    role_names = [r.name.lower().strip() for r in member_roles]
-    safe_user_name = str(interaction.user).encode("ascii", errors="replace").decode()
-    print(f"[*] Permission check for {safe_user_name}: Roles found = {role_names}")
-
-    for r_name in role_names:
-        if "key" in r_name or r_name in ALLOWED_ROLE_NAMES:
-            return True
-
-    return False
 
 
 # ==========================================
@@ -611,13 +563,6 @@ class LicensePanelView(discord.ui.View):
         row=0
     )
     async def select_product_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if not await check_user_permission(interaction):
-            await interaction.response.send_message(
-                f"❌ You need the **{REQUIRED_ROLE_NAME}** role to generate keys.",
-                ephemeral=True
-            )
-            return
-
         product_type = select.values[0]
         prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
         await interaction.response.send_modal(GenerateKeyModal(product_type, prefix))
@@ -630,12 +575,6 @@ class LicensePanelView(discord.ui.View):
         row=1
     )
     async def btn_generate_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_user_permission(interaction):
-            await interaction.response.send_message(
-                f"❌ You need the **{REQUIRED_ROLE_NAME}** role to generate keys.",
-                ephemeral=True
-            )
-            return
         prefix = PRODUCT_PREFIXES.get("INTERNAL", f"{BASE_PREFIX}-INT")
         await interaction.response.send_modal(GenerateKeyModal("INTERNAL", prefix))
 
@@ -657,12 +596,6 @@ class LicensePanelView(discord.ui.View):
         row=2
     )
     async def btn_delete_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_user_permission(interaction):
-            await interaction.response.send_message(
-                f"❌ You need the **{REQUIRED_ROLE_NAME}** role or Administrator permissions to delete keys.",
-                ephemeral=True
-            )
-            return
         await interaction.response.send_modal(DeleteKeyModal())
 
 
@@ -704,24 +637,6 @@ async def on_ready():
     # Register persistent button view
     bot.add_view(LicensePanelView())
 
-    # Auto-create 'key' role in connected guilds if missing
-    for guild in bot.guilds:
-        safe_name = guild.name.encode("ascii", errors="replace").decode()
-        existing_role = discord.utils.find(lambda r: r.name.lower() == "key", guild.roles)
-        if not existing_role:
-            try:
-                created_role = await guild.create_role(
-                    name="key",
-                    color=discord.Color.gold(),
-                    mentionable=True,
-                    reason="Role for license key creation access"
-                )
-                print(f"[+] Created role 'key' in '{safe_name}' (ID: {guild.id})")
-            except Exception as re:
-                print(f"[!] Notice: Could not auto-create role 'key' in '{safe_name}': {re}")
-        else:
-            print(f"[*] Role 'key' already exists in '{safe_name}'.")
-
     try:
         synced_global = await bot.tree.sync()
         print(f"[+] Synced {len(synced_global)} slash command(s) globally.")
@@ -747,20 +662,12 @@ async def on_ready():
 )
 async def panel_command(interaction: discord.Interaction):
     """Slash command to post the license management control panel embed with dropdown & buttons."""
-    if not await check_user_permission(interaction):
-        await interaction.response.send_message(
-            f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to use `/panel`.",
-            ephemeral=True
-        )
-        return
-
     embed = discord.Embed(
         description=(
             "All key actions in one place — results are **private** to you.\n\n"
             "> **Select Product** — Choose (INTERNAL / SILENT AIM / AIMKILL) to generate\n"
             "> **Key Info** — Check status, username, password, HWID, and expiration\n"
-            "> **Delete Key** — Remove a key *(owner / admin)*\n\n"
-            f"*You need the **{REQUIRED_ROLE_NAME}** role to generate keys.*"
+            "> **Delete Key** — Remove a key\n"
         ),
         color=discord.Color.dark_theme()
     )
@@ -792,13 +699,6 @@ async def generate_command(
     expiration: Optional[str] = "7d"
 ):
     """Slash command: /generate [product] [amount] [expiration]"""
-    if not await check_user_permission(interaction):
-        await interaction.response.send_message(
-            f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to generate keys.",
-            ephemeral=True
-        )
-        return
-
     product_type = product.value
     prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
     amount_val = amount if amount is not None else 1
@@ -890,13 +790,6 @@ async def generate_command(
 )
 async def stats_command(interaction: discord.Interaction):
     """Slash command: /stats"""
-    if not await check_user_permission(interaction):
-        await interaction.response.send_message(
-            f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to view stats.",
-            ephemeral=True
-        )
-        return
-
     total, active, expired = fetch_database_stats()
 
     embed = discord.Embed(
@@ -911,47 +804,6 @@ async def stats_command(interaction: discord.Interaction):
     embed.set_footer(text=f"Requested by {interaction.user}")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@bot.tree.command(
-    name="create_role",
-    description="Create or verify the 'key' role for license generation access."
-)
-async def create_role_command(interaction: discord.Interaction):
-    """Creates the 'key' role in the server if it does not already exist."""
-    if not interaction.guild:
-        await interaction.response.send_message("❌ This command must be run inside a Discord server.", ephemeral=True)
-        return
-
-    if isinstance(interaction.user, discord.Member) and not getattr(interaction.user.guild_permissions, "administrator", False):
-        await interaction.response.send_message("❌ Only Administrators can use `/create_role`.", ephemeral=True)
-        return
-
-    existing_role = discord.utils.find(lambda r: r.name.lower() == "key", interaction.guild.roles)
-    if existing_role:
-        await interaction.response.send_message(f"✅ The **key** role already exists: {existing_role.mention}. Assign this role to members who should generate keys.", ephemeral=True)
-        return
-
-    try:
-        new_role = await interaction.guild.create_role(
-            name="key",
-            color=discord.Color.gold(),
-            mentionable=True,
-            reason=f"Created by {interaction.user} via /create_role"
-        )
-        await interaction.response.send_message(
-            f"✅ Successfully created role: {new_role.mention}!\n"
-            f"Members given this role can now create keys from the panel.",
-            ephemeral=True
-        )
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            "❌ The bot needs the **Manage Roles** permission to create roles automatically. "
-            "Please create a role named `key` manually in Server Settings ➔ Roles, or grant the bot Manage Roles.",
-            ephemeral=True
-        )
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to create role: {e}", ephemeral=True)
 
 
 # ==========================================
