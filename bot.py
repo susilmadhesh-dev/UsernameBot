@@ -177,13 +177,47 @@ def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
     return exp_dt, exp_dt.strftime("%d/%m/%Y %H:%M"), days
 
 
-def check_user_permission(member: discord.Member) -> bool:
-    """Checks if the user has Administrator permissions or the 'key' role."""
-    if getattr(member.guild_permissions, "administrator", False):
+async def check_user_permission(interaction: discord.Interaction) -> bool:
+    """
+    Checks if the interacting user has permission to generate or manage keys.
+    Grants access if:
+    1. User is the Server Owner
+    2. User has Administrator permissions
+    3. User has the 'key' role (or 'reseller', or any role name containing 'key')
+    """
+    if not interaction.guild:
         return True
 
-    user_roles = {role.name.lower() for role in getattr(member, "roles", [])}
-    return bool(user_roles & ALLOWED_ROLE_NAMES)
+    # 1. Server Owner
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+
+    # 2. Administrator permission on interaction
+    if getattr(interaction.permissions, "administrator", False):
+        return True
+
+    # 3. Fetch live member from Discord API to avoid stale role cache
+    member = interaction.user
+    try:
+        member = await interaction.guild.fetch_member(interaction.user.id)
+    except Exception:
+        member = interaction.guild.get_member(interaction.user.id) or interaction.user
+
+    # 4. Check Administrator on member
+    if getattr(member, "guild_permissions", None) and member.guild_permissions.administrator:
+        return True
+
+    # 5. Check role names
+    member_roles = getattr(member, "roles", [])
+    role_names = [r.name.lower().strip() for r in member_roles]
+    safe_user_name = str(interaction.user).encode("ascii", errors="replace").decode()
+    print(f"[*] Permission check for {safe_user_name}: Roles found = {role_names}")
+
+    for r_name in role_names:
+        if "key" in r_name or r_name in ALLOWED_ROLE_NAMES:
+            return True
+
+    return False
 
 
 # ==========================================
@@ -577,7 +611,7 @@ class LicensePanelView(discord.ui.View):
         row=0
     )
     async def select_product_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+        if not await check_user_permission(interaction):
             await interaction.response.send_message(
                 f"❌ You need the **{REQUIRED_ROLE_NAME}** role to generate keys.",
                 ephemeral=True
@@ -596,7 +630,7 @@ class LicensePanelView(discord.ui.View):
         row=1
     )
     async def btn_generate_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+        if not await check_user_permission(interaction):
             await interaction.response.send_message(
                 f"❌ You need the **{REQUIRED_ROLE_NAME}** role to generate keys.",
                 ephemeral=True
@@ -623,7 +657,7 @@ class LicensePanelView(discord.ui.View):
         row=2
     )
     async def btn_delete_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+        if not await check_user_permission(interaction):
             await interaction.response.send_message(
                 f"❌ You need the **{REQUIRED_ROLE_NAME}** role or Administrator permissions to delete keys.",
                 ephemeral=True
@@ -713,7 +747,7 @@ async def on_ready():
 )
 async def panel_command(interaction: discord.Interaction):
     """Slash command to post the license management control panel embed with dropdown & buttons."""
-    if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+    if not await check_user_permission(interaction):
         await interaction.response.send_message(
             f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to use `/panel`.",
             ephemeral=True
@@ -758,7 +792,7 @@ async def generate_command(
     expiration: Optional[str] = "7d"
 ):
     """Slash command: /generate [product] [amount] [expiration]"""
-    if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+    if not await check_user_permission(interaction):
         await interaction.response.send_message(
             f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to generate keys.",
             ephemeral=True
@@ -856,7 +890,7 @@ async def generate_command(
 )
 async def stats_command(interaction: discord.Interaction):
     """Slash command: /stats"""
-    if isinstance(interaction.user, discord.Member) and not check_user_permission(interaction.user):
+    if not await check_user_permission(interaction):
         await interaction.response.send_message(
             f"❌ You need Administrator permissions or the **{REQUIRED_ROLE_NAME}** role to view stats.",
             ephemeral=True
