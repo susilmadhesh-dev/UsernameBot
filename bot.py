@@ -172,6 +172,37 @@ def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
     return exp_dt, exp_dt.strftime("%d/%m/%Y %H:%M"), days
 
 
+async def check_admin(interaction: discord.Interaction) -> bool:
+    """
+    Checks if the user has Administrator permissions in the server or is the Server Owner.
+    """
+    if not interaction.guild:
+        return True
+
+    # 1. Server Owner
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+
+    # 2. Check interaction permissions directly evaluated by Discord
+    if getattr(interaction.permissions, "administrator", False):
+        return True
+
+    # 3. Check guild_permissions on cached member
+    member = interaction.user
+    if getattr(member, "guild_permissions", None) and member.guild_permissions.administrator:
+        return True
+
+    # 4. Fetch live member from Discord API to verify permissions
+    try:
+        member = await interaction.guild.fetch_member(interaction.user.id)
+        if member.guild_permissions.administrator:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 # ==========================================
 # DATABASE ENGINE
 # ==========================================
@@ -563,6 +594,9 @@ class LicensePanelView(discord.ui.View):
         row=0
     )
     async def select_product_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not await check_admin(interaction):
+            await interaction.response.send_message("❌ You need Administrator permissions to generate keys.", ephemeral=True)
+            return
         product_type = select.values[0]
         prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
         await interaction.response.send_modal(GenerateKeyModal(product_type, prefix))
@@ -575,6 +609,9 @@ class LicensePanelView(discord.ui.View):
         row=1
     )
     async def btn_generate_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_admin(interaction):
+            await interaction.response.send_message("❌ You need Administrator permissions to generate keys.", ephemeral=True)
+            return
         prefix = PRODUCT_PREFIXES.get("INTERNAL", f"{BASE_PREFIX}-INT")
         await interaction.response.send_modal(GenerateKeyModal("INTERNAL", prefix))
 
@@ -596,6 +633,9 @@ class LicensePanelView(discord.ui.View):
         row=2
     )
     async def btn_delete_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_admin(interaction):
+            await interaction.response.send_message("❌ You need Administrator permissions to delete keys.", ephemeral=True)
+            return
         await interaction.response.send_modal(DeleteKeyModal())
 
 
@@ -662,12 +702,20 @@ async def on_ready():
 )
 async def panel_command(interaction: discord.Interaction):
     """Slash command to post the license management control panel embed with dropdown & buttons."""
+    if not await check_admin(interaction):
+        await interaction.response.send_message(
+            "❌ You need Administrator permissions to use `/panel`.",
+            ephemeral=True
+        )
+        return
+
     embed = discord.Embed(
         description=(
             "All key actions in one place — results are **private** to you.\n\n"
             "> **Select Product** — Choose (INTERNAL / SILENT AIM / AIMKILL) to generate\n"
             "> **Key Info** — Check status, username, password, HWID, and expiration\n"
-            "> **Delete Key** — Remove a key\n"
+            "> **Delete Key** — Remove a key\n\n"
+            "*Only Administrators can generate keys.*"
         ),
         color=discord.Color.dark_theme()
     )
@@ -699,6 +747,12 @@ async def generate_command(
     expiration: Optional[str] = "7d"
 ):
     """Slash command: /generate [product] [amount] [expiration]"""
+    if not await check_admin(interaction):
+        await interaction.response.send_message(
+            "❌ You need Administrator permissions to generate keys.",
+            ephemeral=True
+        )
+        return
     product_type = product.value
     prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
     amount_val = amount if amount is not None else 1
@@ -790,6 +844,13 @@ async def generate_command(
 )
 async def stats_command(interaction: discord.Interaction):
     """Slash command: /stats"""
+    if not await check_admin(interaction):
+        await interaction.response.send_message(
+            "❌ You need Administrator permissions to view stats.",
+            ephemeral=True
+        )
+        return
+
     total, active, expired = fetch_database_stats()
 
     embed = discord.Embed(
