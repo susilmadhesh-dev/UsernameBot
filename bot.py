@@ -11,6 +11,7 @@ Supports 3 Product Types:
 - AIMKILL    (Prefix: ADAMCORP-AMK)
 """
 
+import sys
 import os
 import re
 import string
@@ -23,6 +24,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # ==========================================
 # CONFIGURATION & ENVIRONMENT VARIABLES
@@ -665,6 +672,7 @@ async def on_ready():
 
     # Auto-create 'key' role in connected guilds if missing
     for guild in bot.guilds:
+        safe_name = guild.name.encode("ascii", errors="replace").decode()
         existing_role = discord.utils.find(lambda r: r.name.lower() == "key", guild.roles)
         if not existing_role:
             try:
@@ -674,23 +682,24 @@ async def on_ready():
                     mentionable=True,
                     reason="Role for license key creation access"
                 )
-                print(f"[+] Created role 'key' in '{guild.name}' (ID: {guild.id})")
+                print(f"[+] Created role 'key' in '{safe_name}' (ID: {guild.id})")
             except Exception as re:
-                print(f"[!] Notice: Could not auto-create role 'key' in '{guild.name}': {re}")
+                print(f"[!] Notice: Could not auto-create role 'key' in '{safe_name}': {re}")
         else:
-            print(f"[*] Role 'key' already exists in '{guild.name}'.")
+            print(f"[*] Role 'key' already exists in '{safe_name}'.")
 
     try:
         synced_global = await bot.tree.sync()
         print(f"[+] Synced {len(synced_global)} slash command(s) globally.")
 
         for guild in bot.guilds:
+            safe_name = guild.name.encode("ascii", errors="replace").decode()
             try:
                 bot.tree.copy_global_to(guild=guild)
                 synced_guild = await bot.tree.sync(guild=guild)
-                print(f"[+] Synced {len(synced_guild)} slash command(s) instantly to Guild '{guild.name}' (ID: {guild.id})")
+                print(f"[+] Synced {len(synced_guild)} slash command(s) instantly to Guild '{safe_name}' (ID: {guild.id})")
             except Exception as ge:
-                print(f"[!] Guild sync warning for {guild.name}: {ge}")
+                print(f"[!] Guild sync warning for {safe_name}: {ge}")
     except Exception as e:
         print(f"[!] Failed to sync slash commands: {e}")
 
