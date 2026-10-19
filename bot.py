@@ -7,7 +7,7 @@ custom username/password generation, HWID protection, and DM delivery.
 
 Supports:
 - Xiters Auth Seller API (https://xiter.in/api/seller/)
-- Commands: !genkey, !setsecwl, /internal, /generate, /genkey, /setsecwl, /stats
+- Commands: !genkey, !silentaim, !setsecwl, /generatekey, /generate, /genkey, /setsecwl, /stats
 - 3 Product Types:
   - INTERNAL   (Mask: ADAM CORP INTERNAL-******-******)
   - SILENT AIM (Mask: ADAM CORP SILENT AIM-******-******)
@@ -641,7 +641,7 @@ class LicensePanelView(discord.ui.View):
 
     @discord.ui.button(
         label="Generate Key",
-        style=discord.ButtonStyle.success,
+        style=discord.ButtonStyle.secondary,
         emoji="🔑",
         custom_id="btn_generate_key",
         row=1
@@ -652,6 +652,20 @@ class LicensePanelView(discord.ui.View):
             return
         prefix = PRODUCT_PREFIXES.get("INTERNAL", f"{BASE_PREFIX}-INT")
         await interaction.response.send_modal(GenerateKeyModal("INTERNAL", prefix))
+
+    @discord.ui.button(
+        label="Silent Aim",
+        style=discord.ButtonStyle.success,
+        emoji="🎯",
+        custom_id="btn_silent_aim",
+        row=1
+    )
+    async def btn_silent_aim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_admin(interaction):
+            await interaction.response.send_message("❌ You need Administrator permissions to generate keys.", ephemeral=True)
+            return
+        prefix = PRODUCT_PREFIXES.get("SILENT AIM", f"{BASE_PREFIX}-SIA")
+        await interaction.response.send_modal(GenerateKeyModal("SILENT AIM", prefix))
 
     @discord.ui.button(
         label="Key Info",
@@ -668,7 +682,7 @@ class LicensePanelView(discord.ui.View):
         style=discord.ButtonStyle.danger,
         emoji="🗑️",
         custom_id="btn_delete_key",
-        row=2
+        row=1
     )
     async def btn_delete_key(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_admin(interaction):
@@ -744,25 +758,34 @@ async def on_ready():
 # ==========================================
 @bot.command(name="genkey")
 @commands.has_permissions(administrator=True)
-async def genkey_prefix(ctx: commands.Context, days: int = 1):
-    """Create a license key via Xiters Auth (default 1 day). Example: !genkey 7"""
+async def genkey_prefix(ctx: commands.Context, days: int = 1, *, product: str = "INTERNAL"):
+    """Create a license key via Xiters Auth (default 1 day). Example: !genkey 7 or !genkey 1 SILENT AIM"""
+    prod_upper = product.strip().upper()
+    if "SILENT" in prod_upper:
+        product_type = "SILENT AIM"
+    elif "AIMKILL" in prod_upper:
+        product_type = "AIMKILL"
+    else:
+        product_type = "INTERNAL"
+
+    mask = PRODUCT_MASKS.get(product_type, DEFAULT_KEY_MASK)
     try:
         body = await seller_api(
             type="add",
             amount=1,
             duration=days,
             expiry=86400,
-            mask=DEFAULT_KEY_MASK,
+            mask=mask,
             note=f"discord:{ctx.author.id}",
         )
-        key = extract_key_from_response(body, DEFAULT_KEY_MASK)
+        key = extract_key_from_response(body, mask)
         expires_at = datetime.now(timezone.utc) + timedelta(days=days)
         expires_display = expires_at.strftime("%d/%m/%Y %H:%M")
 
         # Save to SQLite database
         save_key_to_db(
             key=key,
-            product_type="INTERNAL",
+            product_type=product_type,
             assigned_username=key,
             password="",
             hwid="1 (On)",
@@ -778,6 +801,7 @@ async def genkey_prefix(ctx: commands.Context, days: int = 1):
         # Also send credentials to DM
         try:
             await ctx.author.send(
+                f"🏷️ **Product:** `{product_type}`\n"
                 f"🔑 **License Key:** `{key}`\n"
                 f"📅 **Expiration Date:** `{expires_display}`\n"
                 f"💻 **HWID Lock:** `1 (On)`"
@@ -786,6 +810,13 @@ async def genkey_prefix(ctx: commands.Context, days: int = 1):
             pass
     except Exception as e:
         await ctx.reply(f"❌ Error generating key: `{e}`", mention_author=False)
+
+
+@bot.command(name="silentaim", aliases=["gensilentaim"])
+@commands.has_permissions(administrator=True)
+async def silentaim_prefix(ctx: commands.Context, days: int = 1):
+    """Create a Silent Aim license key (default 1 day). Example: !silentaim 1"""
+    await genkey_prefix(ctx, days=days, product="SILENT AIM")
 
 
 @bot.command(name="setsecwl")
@@ -800,6 +831,7 @@ async def setsecwl_prefix(ctx: commands.Context, key: str, enabled: int = 1):
 
 
 @genkey_prefix.error
+@silentaim_prefix.error
 @setsecwl_prefix.error
 async def prefix_error_handler(ctx: commands.Context, error: commands.CommandError):
     """Handles permission and argument errors for prefix commands."""
@@ -815,14 +847,14 @@ async def prefix_error_handler(ctx: commands.Context, error: commands.CommandErr
 # SLASH COMMANDS
 # ==========================================
 @bot.tree.command(
-    name="internal",
+    name="generatekey",
     description="Display the License Management Control Panel."
 )
-async def internal_command(interaction: discord.Interaction):
+async def generatekey_command(interaction: discord.Interaction):
     """Slash command to post the license management control panel embed with dropdown & buttons."""
     if not await check_admin(interaction):
         await interaction.response.send_message(
-            "❌ You need Administrator permissions to use `/internal`.",
+            "❌ You need Administrator permissions to use `/generatekey`.",
             ephemeral=True
         )
         return
