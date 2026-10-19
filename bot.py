@@ -503,7 +503,6 @@ class GenerateKeyModal(discord.ui.Modal):
             embed_dm.add_field(name="🔑 License Key", value=f"`{key}`", inline=False)
             embed_dm.add_field(name="📅 Expiration Date", value=f"`{expires_display}`", inline=True)
             embed_dm.add_field(name="💻 HWID Lock", value=f"`{hwid_val}`", inline=True)
-            embed_dm.add_field(name="🌐 Auth Status", value=auth_info, inline=False)
             embed_dm.add_field(
                 name="📋 Quick Copy Key",
                 value=f"```text\nLicense Key: {key}\nExpires:     {expires_display}\nHWID Lock:   {hwid_val}\n```",
@@ -525,7 +524,6 @@ class GenerateKeyModal(discord.ui.Modal):
         embed_channel.add_field(name="🔑 License Key", value=f"`{key}`", inline=False)
         embed_channel.add_field(name="📅 Expiration Date", value=f"`{expires_display}`", inline=True)
         embed_channel.add_field(name="💻 HWID Lock", value=f"`{hwid_val}`", inline=True)
-        embed_channel.add_field(name="🌐 Auth Status", value=auth_info, inline=False)
         embed_channel.add_field(
             name="📋 Quick Copy Key",
             value=f"```text\nLicense Key: {key}\nExpires:     {expires_display}\nHWID Lock:   {hwid_val}\n```",
@@ -576,7 +574,6 @@ class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
         embed.add_field(name="💻 HWID Lock", value=f"`{hwid_val}`", inline=True)
         embed.add_field(name="🔑 License Key", value=f"`{row['key']}`", inline=False)
         embed.add_field(name="📅 Expiration Date", value=f"`{expires_val}`", inline=True)
-        embed.add_field(name="🌐 Xiters Sync", value=synced_val, inline=True)
         embed.add_field(name="Created At", value=str(row['created_at'])[:19], inline=True)
         embed.add_field(name="Created By", value=str(row['created_by_name']), inline=True)
 
