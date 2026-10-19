@@ -703,7 +703,8 @@ async def start_web_server():
 # BOT INITIALIZATION & EVENTS
 # ==========================================
 intents = discord.Intents.default()
-intents.message_content = True
+if os.getenv("ENABLE_MESSAGE_CONTENT", "false").lower() == "true":
+    intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
