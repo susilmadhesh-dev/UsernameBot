@@ -2,22 +2,28 @@
 Discord License Key Management Bot
 -----------------------------------
 A discord.py bot with an interactive button panel, product selection dropdown,
-pop-up modals, SQLite database persistence, KeyAuth Seller API integration,
+pop-up modals, SQLite database persistence, Xiters Auth Seller API integration,
 custom username/password generation, HWID protection, and DM delivery.
 
-Supports 3 Product Types:
-- INTERNAL   (Prefix: ADAMCORP-INT)
-- SILENT AIM (Prefix: ADAMCORP-SIA)
-- AIMKILL    (Prefix: ADAMCORP-AMK)
+Supports:
+- Xiters Auth Seller API (https://xiter.in/api/seller/)
+- Commands: !genkey, !setsecwl, /panel, /generate, /genkey, /setsecwl, /stats
+- 3 Product Types:
+  - INTERNAL   (Mask: ADAM CORP INTERNAL-******-******)
+  - SILENT AIM (Mask: ADAM CORP SILENT AIM-******-******)
+  - AIMKILL    (Mask: ADAM CORP AIMKILL-******-******)
 """
 
 import sys
 import os
 import re
+import json
 import string
 import secrets
 import sqlite3
+import asyncio
 import aiohttp
+import requests
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Set, Tuple, List, Dict, Any
 import discord
@@ -44,15 +50,30 @@ BASE_PREFIX = os.getenv("KEY_PREFIX", "ADAMCORP")
 KEY_LENGTH = int(os.getenv("KEY_LENGTH", "5"))
 ALLOWED_CHARACTERS = string.ascii_uppercase + string.digits
 
-# Product Type Configuration
+# ------------------------------------------
+# Xiters Auth Configuration (https://xiter.in)
+# ------------------------------------------
+API_URL = os.getenv("API_URL", "https://xiter.in/api/seller/")
+API_KEY = (
+    os.getenv("API_KEY", "").strip()
+    or os.getenv("XITERS_API_KEY", "").strip()
+    or os.getenv("KEYAUTH_SELLER_KEY", "").strip()
+)
+DEFAULT_KEY_MASK = os.getenv("KEY_MASK", "ADAM CORP INTERNAL-******-******")
+
+# Product Masks for Xiters Auth
+PRODUCT_MASKS = {
+    "INTERNAL": os.getenv("MASK_INTERNAL", "ADAM CORP INTERNAL-******-******"),
+    "SILENT AIM": os.getenv("MASK_SILENTAIM", "ADAM CORP SILENT AIM-******-******"),
+    "AIMKILL": os.getenv("MASK_AIMKILL", "ADAM CORP AIMKILL-******-******")
+}
+
+# Local Key Fallback Prefixes
 PRODUCT_PREFIXES = {
     "INTERNAL": f"{BASE_PREFIX}-INT",
     "SILENT AIM": f"{BASE_PREFIX}-SIA",
     "AIMKILL": f"{BASE_PREFIX}-AMK"
 }
-
-# KeyAuth Seller API Configuration
-KEYAUTH_SELLER_KEY = os.getenv("KEYAUTH_SELLER_KEY", "").strip()
 
 # SQLite Database Path
 DB_PATH = "licenses.db"
@@ -62,43 +83,55 @@ generated_keys: Set[str] = set()
 
 
 # ==========================================
-# KEYAUTH SELLER API INTEGRATION
+# XITERS AUTH SELLER API ENGINE
 # ==========================================
-async def sync_keyauth_user(username: str, password: str, sub_name: str, expiry_days: int) -> Dict[str, Any]:
+def seller_api_sync(**data) -> str:
     """
-    Communicates asynchronously with KeyAuth Seller API to register/add user.
-    Endpoint: https://keyauth.win/api/seller/?sellerkey=...&type=adduser&user=...&pass=...&sub=...&expiry=...
+    Synchronous call to Xiters Auth Seller API (https://xiter.in/api/seller/).
+    Matches the official snippet:
+      data["sellerkey"] = API_KEY
+      r = requests.post(API_URL, data=data, timeout=20)
+      r.raise_for_status()
+      return r.text
     """
-    if not KEYAUTH_SELLER_KEY:
-        return {"configured": False, "success": True, "message": "KeyAuth Seller Key not set (local mode active)"}
+    if not API_KEY or API_KEY == "YOUR_API_KEY":
+        raise ValueError("API_KEY is not configured in .env (add API_KEY=your_xiter_seller_key)")
 
-    url = "https://keyauth.win/api/seller/"
-    params = {
-        "sellerkey": KEYAUTH_SELLER_KEY,
-        "type": "adduser",
-        "user": username,
-        "pass": password,
-        "sub": sub_name,
-        "expiry": str(expiry_days)
-    }
+    data["sellerkey"] = API_KEY
+    r = requests.post(API_URL, data=data, timeout=20)
+    r.raise_for_status()
+    return r.text
 
+
+async def seller_api(**data) -> str:
+    """Non-blocking asynchronous wrapper for seller_api_sync."""
+    return await asyncio.to_thread(seller_api_sync, **data)
+
+
+def extract_key_from_response(body: str, default_mask: str = "") -> str:
+    """Extracts the actual generated license key from Xiters Auth API response."""
+    cleaned = body.strip()
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                data = await resp.json(content_type=None)
-                success = bool(data.get("success", False))
-                msg = data.get("message", "User added to KeyAuth" if success else "Failed to add to KeyAuth")
-                return {
-                    "configured": True,
-                    "success": success,
-                    "message": msg
-                }
-    except Exception as e:
-        return {
-            "configured": True,
-            "success": False,
-            "message": f"Connection error: {e}"
-        }
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            for field in ["key", "license", "licence"]:
+                if field in data and isinstance(data[field], str) and data[field].strip():
+                    return data[field].strip()
+            if "keys" in data and isinstance(data["keys"], list) and len(data["keys"]) > 0:
+                return str(data["keys"][0]).strip()
+            if "data" in data and isinstance(data["data"], str):
+                return data["data"].strip()
+            if "message" in data and isinstance(data["message"], str) and "-" in data["message"]:
+                return data["message"].strip()
+    except Exception:
+        pass
+
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if "-" in line and not line.startswith("{") and not line.startswith("<") and not line.startswith("["):
+            return line
+
+    return cleaned
 
 
 # ==========================================
@@ -112,7 +145,7 @@ def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
        e.g. '25/12/2026 18:30' or '25/12/2026'
     2. Relative durations like '1d', '7d', '30d', '12h', '1y'
     3. 'lifetime', 'never', 'perm'
-    Returns: (expires_at_datetime, display_label_dd_mm_yyyy_hh_mm, expiry_days_for_keyauth)
+    Returns: (expires_at_datetime, display_label_dd_mm_yyyy_hh_mm, expiry_days)
     """
     cleaned = raw_str.strip()
 
@@ -173,13 +206,11 @@ def parse_expiration(raw_str: str) -> Tuple[Optional[datetime], str, int]:
 
 
 async def check_admin(interaction: discord.Interaction) -> bool:
-    """
-    Checks if the user has Administrator permissions in the server or is the Server Owner.
-    """
+    """Checks if the interacting user has Administrator permissions in the server or is Server Owner."""
     if not interaction.guild:
         return True
 
-    # 1. Server Owner
+    # 1. Server Owner is always Administrator
     if interaction.user.id == interaction.guild.owner_id:
         return True
 
@@ -192,7 +223,7 @@ async def check_admin(interaction: discord.Interaction) -> bool:
     if getattr(member, "guild_permissions", None) and member.guild_permissions.administrator:
         return True
 
-    # 4. Fetch live member from Discord API to verify permissions
+    # 4. Fetch live member from Discord API to verify fresh permissions
     try:
         member = await interaction.guild.fetch_member(interaction.user.id)
         if member.guild_permissions.administrator:
@@ -287,10 +318,12 @@ def save_key_to_db(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO keys (key, product_type, assigned_username, password, hwid, duration, created_at, expires_at, created_by_id, created_by_name, status, keyauth_synced)
+            INSERT OR REPLACE INTO keys (key, product_type, assigned_username, password, hwid, duration, created_at, expires_at, created_by_id, created_by_name, status, keyauth_synced)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
         """, (key, product_type, assigned_username, password, hwid, duration_label, now_str, expires_str, user_id, str(user_name), keyauth_synced))
         conn.commit()
+
+    generated_keys.add(key)
 
 
 def get_key_info(key_str: str) -> Optional[sqlite3.Row]:
@@ -333,14 +366,10 @@ def fetch_database_stats() -> Tuple[int, int, int]:
 
 
 # ==========================================
-# KEY GENERATOR ENGINE
+# LOCAL KEY GENERATOR FALLBACK
 # ==========================================
 def generate_single_key(prefix: str) -> str:
-    """
-    Generates a cryptographically secure, unique license key with a specific prefix.
-    Example prefixes: ADAMCORP-INT, ADAMCORP-SIA, ADAMCORP-AMK.
-    Output: ADAMCORP-INT7K2P9
-    """
+    """Generates a cryptographically secure, unique license key fallback."""
     max_attempts = 1000
     attempts = 0
 
@@ -405,25 +434,40 @@ class GenerateKeyModal(discord.ui.Modal):
 
         try:
             expires_at, expires_display, expiry_days = parse_expiration(raw_expiration)
-            key = generate_single_key(self.prefix)
         except Exception as err:
             await interaction.followup.send(f"❌ Error: {err}", ephemeral=True)
             return
 
+        # Attempt to create key via Xiters Auth API if configured
+        key = None
+        auth_synced = 0
+        auth_info = "Local Key Storage (API_KEY not configured)"
+        mask = PRODUCT_MASKS.get(self.product_type, DEFAULT_KEY_MASK)
+
+        if API_KEY and API_KEY != "YOUR_API_KEY":
+            try:
+                body = await seller_api(
+                    type="add",
+                    amount=1,
+                    duration=expiry_days,
+                    expiry=86400,
+                    mask=mask,
+                    note=f"discord:{interaction.user.id}"
+                )
+                key = extract_key_from_response(body, mask)
+                auth_synced = 1
+                auth_info = "✅ Created on Xiters Auth (xiter.in)"
+            except Exception as err:
+                print(f"[!] Xiters Auth notice: {err}")
+                key = generate_single_key(self.prefix)
+                auth_synced = 0
+                auth_info = f"⚠️ Xiters Auth notice: {err}"
+        else:
+            key = generate_single_key(self.prefix)
+
         # License key is used as username and password if not explicitly provided
         username = user_input_val if user_input_val else key
         password = pass_input_val if pass_input_val else (user_input_val if user_input_val else key)
-
-        # Attempt KeyAuth Seller API Sync if configured
-        keyauth_synced = 0
-        keyauth_info = "Local Key Storage (KeyAuth Seller Key not set)"
-        if KEYAUTH_SELLER_KEY:
-            sync_res = await sync_keyauth_user(username, password, self.product_type, expiry_days)
-            if sync_res.get("success"):
-                keyauth_synced = 1
-                keyauth_info = "✅ Synced to KeyAuth"
-            else:
-                keyauth_info = f"⚠️ KeyAuth Notice: {sync_res.get('message')}"
 
         # Save to SQLite database
         try:
@@ -437,7 +481,7 @@ class GenerateKeyModal(discord.ui.Modal):
                 expires_at=expires_at,
                 user_id=interaction.user.id,
                 user_name=str(interaction.user),
-                keyauth_synced=keyauth_synced
+                keyauth_synced=auth_synced
             )
         except Exception as db_err:
             await interaction.followup.send(f"❌ Database error: {db_err}", ephemeral=True)
@@ -457,7 +501,7 @@ class GenerateKeyModal(discord.ui.Modal):
             embed_dm.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
             embed_dm.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_display}`", inline=False)
             embed_dm.add_field(name="💻 HWID Affected", value=f"`{hwid_val}`", inline=True)
-            embed_dm.add_field(name="🌐 KeyAuth Status", value=keyauth_info, inline=True)
+            embed_dm.add_field(name="🌐 Auth Status", value=auth_info, inline=True)
             embed_dm.add_field(
                 name="📋 Quick Copy Credentials",
                 value=f"```text\nKey:      {key}\nUsername: {username}\nPassword: {password}\nExpires:  {expires_display}\nHWID:     {hwid_val}\n```",
@@ -481,7 +525,7 @@ class GenerateKeyModal(discord.ui.Modal):
         embed_channel.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
         embed_channel.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_display}`", inline=False)
         embed_channel.add_field(name="💻 HWID Affected", value=f"`{hwid_val}`", inline=True)
-        embed_channel.add_field(name="🌐 KeyAuth Status", value=keyauth_info, inline=True)
+        embed_channel.add_field(name="🌐 Auth Status", value=auth_info, inline=True)
         embed_channel.add_field(
             name="📋 Quick Copy Credentials",
             value=f"```text\nKey:      {key}\nUsername: {username}\nPassword: {password}\nExpires:  {expires_display}\nHWID:     {hwid_val}\n```",
@@ -501,9 +545,9 @@ class GenerateKeyModal(discord.ui.Modal):
 class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
     key_input = discord.ui.TextInput(
         label="License Key",
-        placeholder="Enter key (e.g. ADAMCORP-INT7K2P9)",
+        placeholder="Enter key (e.g. ADAM CORP INTERNAL-xxxxxx-xxxxxx)",
         required=True,
-        max_length=40
+        max_length=60
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -527,14 +571,14 @@ class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
         hwid_val = row_dict.get("hwid") or "Yes (Locked on First Use)"
         duration_val = row_dict.get("duration") or "N/A"
         expires_val = row_dict.get("expires_at") or duration_val
-        synced_val = "✅ Synced to KeyAuth" if row_dict.get("keyauth_synced") else "Local Mode"
+        synced_val = "✅ Synced to Xiters Auth" if row_dict.get("keyauth_synced") else "Local Mode"
 
         embed.add_field(name="Product Type", value=f"**{product_label}**", inline=True)
         embed.add_field(name="Status", value=f"**{str(row['status']).upper()}**", inline=True)
         embed.add_field(name="HWID Affected", value=f"`{hwid_val}`", inline=True)
         embed.add_field(name="👤 Username", value=f"`{username_val}`", inline=True)
         embed.add_field(name="🔒 Password", value=f"`{password_val}`", inline=True)
-        embed.add_field(name="🌐 KeyAuth Sync", value=synced_val, inline=True)
+        embed.add_field(name="🌐 Xiters Sync", value=synced_val, inline=True)
         embed.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_val}`", inline=True)
         embed.add_field(name="Created At", value=str(row['created_at'])[:19], inline=True)
         embed.add_field(name="Created By", value=str(row['created_by_name']), inline=True)
@@ -547,7 +591,7 @@ class DeleteKeyModal(discord.ui.Modal, title="Delete License Key"):
         label="License Key to Delete",
         placeholder="Enter key to remove",
         required=True,
-        max_length=40
+        max_length=60
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -575,19 +619,19 @@ class LicensePanelView(discord.ui.View):
             discord.SelectOption(
                 label="INTERNAL",
                 value="INTERNAL",
-                description="Format: ADAMCORP-INTxxxx",
+                description="Mask: ADAM CORP INTERNAL-******-******",
                 emoji="🎯"
             ),
             discord.SelectOption(
                 label="SILENT AIM",
                 value="SILENT AIM",
-                description="Format: ADAMCORP-SIAxxxx",
+                description="Mask: ADAM CORP SILENT AIM-******-******",
                 emoji="🎯"
             ),
             discord.SelectOption(
                 label="AIMKILL",
                 value="AIMKILL",
-                description="Format: ADAMCORP-AMKxxxx",
+                description="Mask: ADAM CORP AIMKILL-******-******",
                 emoji="🎯"
             )
         ],
@@ -659,6 +703,7 @@ async def start_web_server():
 # BOT INITIALIZATION & EVENTS
 # ==========================================
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -677,20 +722,99 @@ async def on_ready():
     # Register persistent button view
     bot.add_view(LicensePanelView())
 
+    # Sync slash commands
     try:
-        synced_global = await bot.tree.sync()
-        print(f"[+] Synced {len(synced_global)} slash command(s) globally.")
-
-        for guild in bot.guilds:
-            safe_name = guild.name.encode("ascii", errors="replace").decode()
-            try:
-                bot.tree.copy_global_to(guild=guild)
-                synced_guild = await bot.tree.sync(guild=guild)
-                print(f"[+] Synced {len(synced_guild)} slash command(s) instantly to Guild '{safe_name}' (ID: {guild.id})")
-            except Exception as ge:
-                print(f"[!] Guild sync warning for {safe_name}: {ge}")
+        if GUILD_ID and str(GUILD_ID).isdigit() and int(GUILD_ID) > 0:
+            guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print(f"[+] Synced slash commands to Guild ID: {GUILD_ID}")
+        else:
+            synced_global = await bot.tree.sync()
+            print(f"[+] Synced {len(synced_global)} slash command(s) globally.")
+            for guild in bot.guilds:
+                safe_name = guild.name.encode("ascii", errors="replace").decode()
+                try:
+                    bot.tree.copy_global_to(guild=guild)
+                    await bot.tree.sync(guild=guild)
+                    print(f"[+] Synced slash commands to Guild '{safe_name}' (ID: {guild.id})")
+                except Exception as ge:
+                    print(f"[!] Guild sync warning for '{safe_name}': {ge}")
     except Exception as e:
         print(f"[!] Failed to sync slash commands: {e}")
+
+
+# ==========================================
+# PREFIX COMMANDS (XITERS AUTH SPEC)
+# ==========================================
+@bot.command(name="genkey")
+@commands.has_permissions(administrator=True)
+async def genkey_prefix(ctx: commands.Context, days: int = 1):
+    """Create a license key via Xiters Auth (default 1 day). Example: !genkey 7"""
+    try:
+        body = await seller_api(
+            type="add",
+            amount=1,
+            duration=days,
+            expiry=86400,
+            mask=DEFAULT_KEY_MASK,
+            note=f"discord:{ctx.author.id}",
+        )
+        key = extract_key_from_response(body, DEFAULT_KEY_MASK)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+        expires_display = expires_at.strftime("%d/%m/%Y %H:%M")
+
+        # Save to SQLite database
+        save_key_to_db(
+            key=key,
+            product_type="INTERNAL",
+            assigned_username=key,
+            password=key,
+            hwid="Yes (Locked on First Use)",
+            duration_label=f"{days} Day(s)",
+            expires_at=expires_at,
+            user_id=ctx.author.id,
+            user_name=str(ctx.author),
+            keyauth_synced=1
+        )
+
+        await ctx.reply(f"```{body}```", mention_author=False)
+
+        # Also send credentials to DM
+        try:
+            await ctx.author.send(
+                f"🔑 **License Key:** `{key}`\n"
+                f"👤 **Username:** `{key}`\n"
+                f"🔒 **Password:** `{key}`\n"
+                f"📅 **Expires:** `{expires_display}`"
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        await ctx.reply(f"❌ Error generating key: `{e}`", mention_author=False)
+
+
+@bot.command(name="setsecwl")
+@commands.has_permissions(administrator=True)
+async def setsecwl_prefix(ctx: commands.Context, key: str, enabled: int = 1):
+    """Security whitelist a key (1=on, 0=off). Example: !setsecwl KEY 1"""
+    try:
+        body = await seller_api(type="setsecwl", key=key.strip(), enabled=enabled)
+        await ctx.reply(f"```{body}```", mention_author=False)
+    except Exception as e:
+        await ctx.reply(f"❌ Error: `{e}`", mention_author=False)
+
+
+@genkey_prefix.error
+@setsecwl_prefix.error
+async def prefix_error_handler(ctx: commands.Context, error: commands.CommandError):
+    """Handles permission and argument errors for prefix commands."""
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply("❌ You need Administrator permissions to use this command.", mention_author=False)
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.reply(f"❌ Missing required argument: `{error.param.name}`", mention_author=False)
+    else:
+        await ctx.reply(f"❌ Error: {error}", mention_author=False)
 
 
 # ==========================================
@@ -727,13 +851,110 @@ async def panel_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="genkey",
+    description="Create a license key via Xiters Auth API."
+)
+@app_commands.describe(
+    days="Duration in days (default 1).",
+    product="Select product type (default INTERNAL)."
+)
+@app_commands.choices(product=[
+    app_commands.Choice(name="INTERNAL (ADAM CORP INTERNAL-******-******)", value="INTERNAL"),
+    app_commands.Choice(name="SILENT AIM (ADAM CORP SILENT AIM-******-******)", value="SILENT AIM"),
+    app_commands.Choice(name="AIMKILL (ADAM CORP AIMKILL-******-******)", value="AIMKILL")
+])
+async def genkey_slash_command(
+    interaction: discord.Interaction,
+    days: Optional[int] = 1,
+    product: Optional[app_commands.Choice[str]] = None
+):
+    """Slash command: /genkey [days] [product]"""
+    if not await check_admin(interaction):
+        await interaction.response.send_message("❌ You need Administrator permissions to generate keys.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    product_type = product.value if product else "INTERNAL"
+    mask = PRODUCT_MASKS.get(product_type, DEFAULT_KEY_MASK)
+    days_val = days if days is not None and days > 0 else 1
+
+    try:
+        body = await seller_api(
+            type="add",
+            amount=1,
+            duration=days_val,
+            expiry=86400,
+            mask=mask,
+            note=f"discord:{interaction.user.id}",
+        )
+        key = extract_key_from_response(body, mask)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=days_val)
+        expires_display = expires_at.strftime("%d/%m/%Y %H:%M")
+
+        save_key_to_db(
+            key=key,
+            product_type=product_type,
+            assigned_username=key,
+            password=key,
+            hwid="Yes (Locked on First Use)",
+            duration_label=f"{days_val} Day(s)",
+            expires_at=expires_at,
+            user_id=interaction.user.id,
+            user_name=str(interaction.user),
+            keyauth_synced=1
+        )
+
+        response_msg = (
+            f"```{body}```\n"
+            f"🔑 **Key:** `{key}`\n"
+            f"👤 **Username:** `{key}`\n"
+            f"🔒 **Password:** `{key}`\n"
+            f"📅 **Expires:** `{expires_display}`"
+        )
+        await interaction.followup.send(response_msg, ephemeral=True)
+
+        try:
+            await interaction.user.send(response_msg)
+        except Exception:
+            pass
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error from Xiters Auth: `{e}`", ephemeral=True)
+
+
+@bot.tree.command(
+    name="setsecwl",
+    description="Security whitelist a key in Xiters Auth (1=on, 0=off)."
+)
+@app_commands.describe(
+    key="The license key to whitelist.",
+    enabled="1 for on, 0 for off (default 1)."
+)
+async def setsecwl_slash_command(
+    interaction: discord.Interaction,
+    key: str,
+    enabled: Optional[int] = 1
+):
+    """Slash command: /setsecwl [key] [enabled]"""
+    if not await check_admin(interaction):
+        await interaction.response.send_message("❌ You need Administrator permissions to use `/setsecwl`.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        body = await seller_api(type="setsecwl", key=key.strip(), enabled=enabled if enabled is not None else 1)
+        await interaction.followup.send(f"```{body}```", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error from Xiters Auth: `{e}`", ephemeral=True)
+
+
+@bot.tree.command(
     name="generate",
     description="Generate unique license keys and credentials for a specific product."
 )
 @app_commands.choices(product=[
-    app_commands.Choice(name="INTERNAL (ADAMCORP-INTxxxx)", value="INTERNAL"),
-    app_commands.Choice(name="SILENT AIM (ADAMCORP-SIAxxxx)", value="SILENT AIM"),
-    app_commands.Choice(name="AIMKILL (ADAMCORP-AMKxxxx)", value="AIMKILL")
+    app_commands.Choice(name="INTERNAL", value="INTERNAL"),
+    app_commands.Choice(name="SILENT AIM", value="SILENT AIM"),
+    app_commands.Choice(name="AIMKILL", value="AIMKILL")
 ])
 @app_commands.describe(
     product="Select product type (INTERNAL, SILENT AIM, or AIMKILL).",
@@ -753,8 +974,10 @@ async def generate_command(
             ephemeral=True
         )
         return
+
     product_type = product.value
     prefix = PRODUCT_PREFIXES.get(product_type, f"{BASE_PREFIX}-INT")
+    mask = PRODUCT_MASKS.get(product_type, DEFAULT_KEY_MASK)
     amount_val = amount if amount is not None else 1
     exp_str = expiration if expiration else "7d"
 
@@ -770,15 +993,28 @@ async def generate_command(
     hwid_val = "Yes (Locked on First Use)"
 
     for _ in range(amount_val):
-        key = generate_single_key(prefix)
+        key = None
+        auth_synced = 0
+        if API_KEY and API_KEY != "YOUR_API_KEY":
+            try:
+                body = await seller_api(
+                    type="add",
+                    amount=1,
+                    duration=expiry_days,
+                    expiry=86400,
+                    mask=mask,
+                    note=f"discord:{interaction.user.id}"
+                )
+                key = extract_key_from_response(body, mask)
+                auth_synced = 1
+            except Exception as err:
+                print(f"[!] Xiters Auth notice: {err}")
+                key = generate_single_key(prefix)
+        else:
+            key = generate_single_key(prefix)
+
         username = key
         password = key
-
-        keyauth_synced = 0
-        if KEYAUTH_SELLER_KEY:
-            sync_res = await sync_keyauth_user(username, password, product_type, expiry_days)
-            if sync_res.get("success"):
-                keyauth_synced = 1
 
         save_key_to_db(
             key=key,
@@ -790,7 +1026,7 @@ async def generate_command(
             expires_at=expires_at,
             user_id=interaction.user.id,
             user_name=str(interaction.user),
-            keyauth_synced=keyauth_synced
+            keyauth_synced=auth_synced
         )
 
         generated_items.append({
@@ -861,7 +1097,7 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(name="Total Keys Generated", value=str(total), inline=True)
     embed.add_field(name="Active Keys", value=str(active), inline=True)
     embed.add_field(name="Expired Keys", value=str(expired), inline=True)
-    embed.add_field(name="KeyAuth Integration", value="Active" if KEYAUTH_SELLER_KEY else "Local Mode", inline=True)
+    embed.add_field(name="Xiters Auth Integration", value="Active" if API_KEY and API_KEY != "YOUR_API_KEY" else "Local Mode", inline=True)
     embed.set_footer(text=f"Requested by {interaction.user}")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -873,8 +1109,8 @@ async def stats_command(interaction: discord.Interaction):
 if __name__ == "__main__":
     if not DISCORD_TOKEN or DISCORD_TOKEN.strip() == "" or DISCORD_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("[!] CRITICAL ERROR: Discord bot token not found in environment!")
-        print("Please copy `.env.example` to `.env` and set DISCORD_TOKEN=your_bot_token")
+        print("Please set DISCORD_TOKEN in .env")
     else:
         init_db()
-        print("[*] Starting Discord License Generator Bot...")
+        print("[*] Starting Discord License Generator Bot (Xiters Auth Integrated)...")
         bot.run(DISCORD_TOKEN)
