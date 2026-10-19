@@ -7,7 +7,7 @@ custom username/password generation, HWID protection, and DM delivery.
 
 Supports:
 - Xiters Auth Seller API (https://xiter.in/api/seller/)
-- Commands: !genkey, !setsecwl, /panel, /generate, /genkey, /setsecwl, /stats
+- Commands: !genkey, !setsecwl, /internal, /generate, /genkey, /setsecwl, /stats
 - 3 Product Types:
   - INTERNAL   (Mask: ADAM CORP INTERNAL-******-******)
   - SILENT AIM (Mask: ADAM CORP SILENT AIM-******-******)
@@ -815,14 +815,14 @@ async def prefix_error_handler(ctx: commands.Context, error: commands.CommandErr
 # SLASH COMMANDS
 # ==========================================
 @bot.tree.command(
-    name="panel",
+    name="internal",
     description="Display the License Management Control Panel."
 )
-async def panel_command(interaction: discord.Interaction):
+async def internal_command(interaction: discord.Interaction):
     """Slash command to post the license management control panel embed with dropdown & buttons."""
     if not await check_admin(interaction):
         await interaction.response.send_message(
-            "❌ You need Administrator permissions to use `/panel`.",
+            "❌ You need Administrator permissions to use `/internal`.",
             ephemeral=True
         )
         return

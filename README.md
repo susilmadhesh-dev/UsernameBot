@@ -1,12 +1,12 @@
 # ADAMCORP License Key Generator & Management Bot
 
-A modern, secure Discord bot built in Python using `discord.py` featuring an interactive control panel (`/panel`), pop-up modals, SQLite database persistence, and 24/7 Render.com deployment readiness.
+A modern, secure Discord bot built in Python using `discord.py` featuring an interactive control panel (`/internal`), pop-up modals, SQLite database persistence, and 24/7 Render.com deployment readiness.
 
 ---
 
 ## Features
 
-- **Interactive Control Panel (`/panel`)**:
+- **Interactive Control Panel (`/internal`)**:
   - 🟢 **Generate Key**: Pop-up modal to assign custom username (or auto-generate).
   - 🔵 **Key Info**: Query key status, assigned username, and creation date.
   - 🔴 **Delete Key**: Revoke and delete keys from database.
