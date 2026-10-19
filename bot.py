@@ -392,31 +392,25 @@ def generate_single_key(prefix: str) -> str:
 # DISCORD MODALS (POP-UP DIALOGS)
 # ==========================================
 class GenerateKeyModal(discord.ui.Modal):
-    username_input = discord.ui.TextInput(
-        label="Username (Optional)",
-        placeholder="Leave blank to use License Key",
+    key_input = discord.ui.TextInput(
+        label="License Key",
+        placeholder="Leave blank to auto-generate key",
         required=False,
-        max_length=50
-    )
-    password_input = discord.ui.TextInput(
-        label="Password (Optional)",
-        placeholder="Leave blank to use License Key",
-        required=False,
-        max_length=50
+        max_length=60
     )
     expiration_input = discord.ui.TextInput(
-        label="Expiration (DD/MM/YYYY HH:MM or 7d)",
-        placeholder="e.g. 25/12/2026 18:30 or 7d, 30d, lifetime",
+        label="Expiration Date",
+        placeholder="e.g. 25/12/2026 18:30 or 7d, 30d, 1d",
         default="7d",
         required=True,
         max_length=30
     )
     hwid_input = discord.ui.TextInput(
-        label="HWID Lock / Affected",
-        placeholder="Leave blank for default (Locked on 1st Login)",
-        default="Yes (Locked on First Use)",
+        label="HWID Lock (1 = On, 0 = Off)",
+        placeholder="1 for On, 0 for Off (Default: 1)",
+        default="1",
         required=False,
-        max_length=50
+        max_length=10
     )
 
     def __init__(self, product_type: str, prefix: str):
@@ -427,9 +421,15 @@ class GenerateKeyModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        user_input_val = self.username_input.value.strip() if self.username_input.value else ""
-        pass_input_val = self.password_input.value.strip() if self.password_input.value else ""
-        hwid_val = self.hwid_input.value.strip() if self.hwid_input.value else "Yes (Locked on First Use)"
+        user_key_val = self.key_input.value.strip() if self.key_input.value else ""
+        hwid_raw = self.hwid_input.value.strip() if self.hwid_input.value else "1"
+        if hwid_raw in ["0", "off", "false", "no"]:
+            hwid_val = "0 (Off)"
+            hwid_int = 0
+        else:
+            hwid_val = "1 (On)"
+            hwid_int = 1
+
         raw_expiration = self.expiration_input.value.strip()
 
         try:
@@ -444,7 +444,10 @@ class GenerateKeyModal(discord.ui.Modal):
         auth_info = "Local Key Storage (API_KEY not configured)"
         mask = PRODUCT_MASKS.get(self.product_type, DEFAULT_KEY_MASK)
 
-        if API_KEY and API_KEY != "YOUR_API_KEY":
+        if user_key_val:
+            key = user_key_val
+            auth_info = "Custom Key Specified"
+        elif API_KEY and API_KEY != "YOUR_API_KEY":
             try:
                 body = await seller_api(
                     type="add",
@@ -457,6 +460,11 @@ class GenerateKeyModal(discord.ui.Modal):
                 key = extract_key_from_response(body, mask)
                 auth_synced = 1
                 auth_info = "✅ Created on Xiters Auth (xiter.in)"
+                # Sync security whitelist / HWID lock with Xiters Auth
+                try:
+                    await seller_api(type="setsecwl", key=key, enabled=hwid_int)
+                except Exception:
+                    pass
             except Exception as err:
                 print(f"[!] Xiters Auth notice: {err}")
                 key = generate_single_key(self.prefix)
@@ -465,17 +473,13 @@ class GenerateKeyModal(discord.ui.Modal):
         else:
             key = generate_single_key(self.prefix)
 
-        # License key is used as username and password if not explicitly provided
-        username = user_input_val if user_input_val else key
-        password = pass_input_val if pass_input_val else (user_input_val if user_input_val else key)
-
-        # Save to SQLite database
+        # Save to SQLite database (assigned_username stores the License Key, no password)
         try:
             save_key_to_db(
                 key=key,
                 product_type=self.product_type,
-                assigned_username=username,
-                password=password,
+                assigned_username=key,
+                password="",
                 hwid=hwid_val,
                 duration_label=expires_display,
                 expires_at=expires_at,
@@ -491,23 +495,21 @@ class GenerateKeyModal(discord.ui.Modal):
         dm_delivered = True
         try:
             embed_dm = discord.Embed(
-                title="🔑 Your License Key & Account Credentials",
+                title="🔑 Your License Key Generated",
                 color=discord.Color.green(),
                 timestamp=datetime.now(timezone.utc)
             )
             embed_dm.add_field(name="Product Type", value=f"**{self.product_type}**", inline=True)
-            embed_dm.add_field(name="License Key", value=f"`{key}`", inline=False)
-            embed_dm.add_field(name="👤 Username", value=f"`{username}`", inline=True)
-            embed_dm.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
-            embed_dm.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_display}`", inline=False)
-            embed_dm.add_field(name="💻 HWID Affected", value=f"`{hwid_val}`", inline=True)
-            embed_dm.add_field(name="🌐 Auth Status", value=auth_info, inline=True)
+            embed_dm.add_field(name="🔑 License Key", value=f"`{key}`", inline=False)
+            embed_dm.add_field(name="📅 Expiration Date", value=f"`{expires_display}`", inline=True)
+            embed_dm.add_field(name="💻 HWID Lock", value=f"`{hwid_val}`", inline=True)
+            embed_dm.add_field(name="🌐 Auth Status", value=auth_info, inline=False)
             embed_dm.add_field(
-                name="📋 Quick Copy Credentials",
-                value=f"```text\nKey:      {key}\nUsername: {username}\nPassword: {password}\nExpires:  {expires_display}\nHWID:     {hwid_val}\n```",
+                name="📋 Quick Copy Key",
+                value=f"```text\nLicense Key: {key}\nExpires:     {expires_display}\nHWID Lock:   {hwid_val}\n```",
                 inline=False
             )
-            embed_dm.set_footer(text="Keep your credentials safe! Do not share your password.")
+            embed_dm.set_footer(text="Keep your License Key safe!")
             await interaction.user.send(embed=embed_dm)
         except Exception as dme:
             dm_delivered = False
@@ -515,20 +517,18 @@ class GenerateKeyModal(discord.ui.Modal):
 
         # Send response in channel (visible privately to user)
         embed_channel = discord.Embed(
-            title="🔑 License Key & Credentials Generated",
+            title="🔑 License Key Generated",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
         embed_channel.add_field(name="Product Type", value=f"**{self.product_type}**", inline=True)
-        embed_channel.add_field(name="License Key", value=f"`{key}`", inline=False)
-        embed_channel.add_field(name="👤 Username", value=f"`{username}`", inline=True)
-        embed_channel.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
-        embed_channel.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_display}`", inline=False)
-        embed_channel.add_field(name="💻 HWID Affected", value=f"`{hwid_val}`", inline=True)
-        embed_channel.add_field(name="🌐 Auth Status", value=auth_info, inline=True)
+        embed_channel.add_field(name="🔑 License Key", value=f"`{key}`", inline=False)
+        embed_channel.add_field(name="📅 Expiration Date", value=f"`{expires_display}`", inline=True)
+        embed_channel.add_field(name="💻 HWID Lock", value=f"`{hwid_val}`", inline=True)
+        embed_channel.add_field(name="🌐 Auth Status", value=auth_info, inline=False)
         embed_channel.add_field(
-            name="📋 Quick Copy Credentials",
-            value=f"```text\nKey:      {key}\nUsername: {username}\nPassword: {password}\nExpires:  {expires_display}\nHWID:     {hwid_val}\n```",
+            name="📋 Quick Copy Key",
+            value=f"```text\nLicense Key: {key}\nExpires:     {expires_display}\nHWID Lock:   {hwid_val}\n```",
             inline=False
         )
 
@@ -566,20 +566,17 @@ class KeyInfoModal(discord.ui.Modal, title="Check Key Information"):
             timestamp=datetime.now(timezone.utc)
         )
         product_label = row_dict.get("product_type") or "INTERNAL"
-        username_val = row_dict.get("assigned_username") or "N/A"
-        password_val = row_dict.get("password") or "N/A"
-        hwid_val = row_dict.get("hwid") or "Yes (Locked on First Use)"
+        hwid_val = row_dict.get("hwid") or "1 (On)"
         duration_val = row_dict.get("duration") or "N/A"
         expires_val = row_dict.get("expires_at") or duration_val
         synced_val = "✅ Synced to Xiters Auth" if row_dict.get("keyauth_synced") else "Local Mode"
 
         embed.add_field(name="Product Type", value=f"**{product_label}**", inline=True)
         embed.add_field(name="Status", value=f"**{str(row['status']).upper()}**", inline=True)
-        embed.add_field(name="HWID Affected", value=f"`{hwid_val}`", inline=True)
-        embed.add_field(name="👤 Username", value=f"`{username_val}`", inline=True)
-        embed.add_field(name="🔒 Password", value=f"`{password_val}`", inline=True)
+        embed.add_field(name="💻 HWID Lock", value=f"`{hwid_val}`", inline=True)
+        embed.add_field(name="🔑 License Key", value=f"`{row['key']}`", inline=False)
+        embed.add_field(name="📅 Expiration Date", value=f"`{expires_val}`", inline=True)
         embed.add_field(name="🌐 Xiters Sync", value=synced_val, inline=True)
-        embed.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{expires_val}`", inline=True)
         embed.add_field(name="Created At", value=str(row['created_at'])[:19], inline=True)
         embed.add_field(name="Created By", value=str(row['created_by_name']), inline=True)
 
@@ -770,8 +767,8 @@ async def genkey_prefix(ctx: commands.Context, days: int = 1):
             key=key,
             product_type="INTERNAL",
             assigned_username=key,
-            password=key,
-            hwid="Yes (Locked on First Use)",
+            password="",
+            hwid="1 (On)",
             duration_label=f"{days} Day(s)",
             expires_at=expires_at,
             user_id=ctx.author.id,
@@ -785,9 +782,8 @@ async def genkey_prefix(ctx: commands.Context, days: int = 1):
         try:
             await ctx.author.send(
                 f"🔑 **License Key:** `{key}`\n"
-                f"👤 **Username:** `{key}`\n"
-                f"🔒 **Password:** `{key}`\n"
-                f"📅 **Expires:** `{expires_display}`"
+                f"📅 **Expiration Date:** `{expires_display}`\n"
+                f"💻 **HWID Lock:** `1 (On)`"
             )
         except Exception:
             pass
@@ -838,7 +834,7 @@ async def panel_command(interaction: discord.Interaction):
         description=(
             "All key actions in one place — results are **private** to you.\n\n"
             "> **Select Product** — Choose (INTERNAL / SILENT AIM / AIMKILL) to generate\n"
-            "> **Key Info** — Check status, username, password, HWID, and expiration\n"
+            "> **Key Info** — Check status, License Key, HWID, and expiration\n"
             "> **Delete Key** — Remove a key\n\n"
             "*Only Administrators can generate keys.*"
         ),
@@ -896,8 +892,8 @@ async def genkey_slash_command(
             key=key,
             product_type=product_type,
             assigned_username=key,
-            password=key,
-            hwid="Yes (Locked on First Use)",
+            password="",
+            hwid="1 (On)",
             duration_label=f"{days_val} Day(s)",
             expires_at=expires_at,
             user_id=interaction.user.id,
@@ -907,10 +903,9 @@ async def genkey_slash_command(
 
         response_msg = (
             f"```{body}```\n"
-            f"🔑 **Key:** `{key}`\n"
-            f"👤 **Username:** `{key}`\n"
-            f"🔒 **Password:** `{key}`\n"
-            f"📅 **Expires:** `{expires_display}`"
+            f"🔑 **License Key:** `{key}`\n"
+            f"📅 **Expiration Date:** `{expires_display}`\n"
+            f"💻 **HWID Lock:** `1 (On)`"
         )
         await interaction.followup.send(response_msg, ephemeral=True)
 
@@ -991,7 +986,7 @@ async def generate_command(
         return
 
     generated_items = []
-    hwid_val = "Yes (Locked on First Use)"
+    hwid_val = "1 (On)"
 
     for _ in range(amount_val):
         key = None
@@ -1008,20 +1003,21 @@ async def generate_command(
                 )
                 key = extract_key_from_response(body, mask)
                 auth_synced = 1
+                try:
+                    await seller_api(type="setsecwl", key=key, enabled=1)
+                except Exception:
+                    pass
             except Exception as err:
                 print(f"[!] Xiters Auth notice: {err}")
                 key = generate_single_key(prefix)
         else:
             key = generate_single_key(prefix)
 
-        username = key
-        password = key
-
         save_key_to_db(
             key=key,
             product_type=product_type,
-            assigned_username=username,
-            password=password,
+            assigned_username=key,
+            password="",
             hwid=hwid_val,
             duration_label=expires_display,
             expires_at=expires_at,
@@ -1032,8 +1028,6 @@ async def generate_command(
 
         generated_items.append({
             "key": key,
-            "username": username,
-            "password": password,
             "expires": expires_display,
             "hwid": hwid_val
         })
@@ -1041,19 +1035,17 @@ async def generate_command(
     if amount_val == 1:
         item = generated_items[0]
         embed = discord.Embed(
-            title="🔑 License Key & Credentials Generated",
+            title="🔑 License Key Generated",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
         embed.add_field(name="Product Type", value=f"**{product_type}**", inline=True)
-        embed.add_field(name="License Key", value=f"`{item['key']}`", inline=False)
-        embed.add_field(name="👤 Username", value=f"`{item['username']}`", inline=True)
-        embed.add_field(name="🔒 Password", value=f"`{item['password']}`", inline=True)
-        embed.add_field(name="📅 Expiration (DD/MM/YYYY HH:MM)", value=f"`{item['expires']}`", inline=False)
-        embed.add_field(name="💻 HWID Affected", value=f"`{item['hwid']}`", inline=True)
+        embed.add_field(name="🔑 License Key", value=f"`{item['key']}`", inline=False)
+        embed.add_field(name="📅 Expiration Date", value=f"`{item['expires']}`", inline=True)
+        embed.add_field(name="💻 HWID Lock", value=f"`{item['hwid']}`", inline=True)
         embed.add_field(
-            name="📋 Quick Copy Credentials",
-            value=f"```text\nKey:      {item['key']}\nUsername: {item['username']}\nPassword: {item['password']}\nExpires:  {item['expires']}\nHWID:     {item['hwid']}\n```",
+            name="📋 Quick Copy Key",
+            value=f"```text\nLicense Key: {item['key']}\nExpires:     {item['expires']}\nHWID Lock:   {item['hwid']}\n```",
             inline=False
         )
         embed.set_footer(text=f"Generated for {interaction.user}")
@@ -1065,9 +1057,9 @@ async def generate_command(
     else:
         text_lines = []
         for i, item in enumerate(generated_items, 1):
-            text_lines.append(f"[{i}] Key: {item['key']} | User: {item['username']} | Pass: {item['password']} | Exp: {item['expires']} | HWID: {item['hwid']}")
+            text_lines.append(f"[{i}] Key: {item['key']} | Exp: {item['expires']} | HWID: {item['hwid']}")
 
-        result_text = f"**Generated {amount_val} {product_type} Licenses & Accounts:**\n```text\n" + "\n".join(text_lines) + "\n```"
+        result_text = f"**Generated {amount_val} {product_type} Licenses:**\n```text\n" + "\n".join(text_lines) + "\n```"
         await interaction.followup.send(result_text, ephemeral=True)
         try:
             await interaction.user.send(result_text)
